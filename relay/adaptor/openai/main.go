@@ -30,6 +30,9 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 	scanner.Split(bufio.ScanLines)
 	var usage *model.Usage
 
+	for k, v := range resp.Header {
+		c.Writer.Header().Set(k, v[0])
+	}
 	common.SetEventStreamHeaders(c)
 
 	doneRendered := false
