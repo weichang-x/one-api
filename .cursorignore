@@ -1,0 +1,13 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+
+.gitignore
+.cursorignore
+.log
+.idea
+.vscode
+.DS_Store
+.env
+.env.local
+.env.development
+.env.production
+/web/node_modules

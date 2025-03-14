@@ -2,10 +2,12 @@ package common
 
 import (
 	"context"
-	"github.com/go-redis/redis/v8"
-	"github.com/songquanpeng/one-api/common/logger"
+	"errors"
 	"os"
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/songquanpeng/one-api/common/logger"
 )
 
 var RDB *redis.Client
@@ -66,4 +68,12 @@ func RedisDel(key string) error {
 func RedisDecrease(key string, value int64) error {
 	ctx := context.Background()
 	return RDB.DecrBy(ctx, key, value).Err()
+}
+
+// RedisSetWithExpiration sets a key with expiration time
+func RedisSetWithExpiration(key string, value string, expiration time.Duration) error {
+	if RDB == nil {
+		return errors.New("redis client is nil")
+	}
+	return RDB.Set(context.Background(), key, value, expiration).Err()
 }

@@ -1,13 +1,14 @@
 package controller
 
 import (
+	"net/http"
+	"strconv"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/model"
-	"net/http"
-	"strconv"
-	"strings"
 )
 
 func GetAllChannels(c *gin.Context) {

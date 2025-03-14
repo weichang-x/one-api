@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
 	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/random"
 )
 
 var (
@@ -252,4 +253,26 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 		}
 	}
 	return channels[idx], nil
+}
+
+// GetAvailableChannels 获取指定用户组和模型下所有可用的渠道
+func GetAvailableChannels(userGroup string, requestModel string) []*Channel {
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+
+	// 从缓存中获取该用户组下该模型的所有渠道
+	channels := group2model2channels[userGroup][requestModel]
+	if len(channels) == 0 {
+		return nil
+	}
+
+	// 过滤出状态为启用的渠道
+	availableChannels := make([]*Channel, 0)
+	for _, channel := range channels {
+		if channel.Status == ChannelStatusEnabled {
+			availableChannels = append(availableChannels, channel)
+		}
+	}
+
+	return availableChannels
 }

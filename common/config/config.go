@@ -1,12 +1,13 @@
 package config
 
 import (
-	"github.com/songquanpeng/one-api/common/env"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/songquanpeng/one-api/common/env"
 
 	"github.com/google/uuid"
 )
@@ -56,7 +57,7 @@ var EmailDomainWhitelist = []string{
 var DebugEnabled = strings.ToLower(os.Getenv("DEBUG")) == "true"
 var DebugSQLEnabled = strings.ToLower(os.Getenv("DEBUG_SQL")) == "true"
 var MemoryCacheEnabled = strings.ToLower(os.Getenv("MEMORY_CACHE_ENABLED")) == "true"
-
+var CircuitBreakerEnabled = strings.ToLower(os.Getenv("CIRCUIT_BREAKER_ENABLED")) == "true"
 var LogConsumeEnabled = true
 
 var SMTPServer = ""
@@ -114,7 +115,8 @@ var BatchUpdateInterval = env.Int("BATCH_UPDATE_INTERVAL", 5)
 var RelayTimeout = env.Int("RELAY_TIMEOUT", 0) // unit is second
 
 var GeminiSafetySetting = env.String("GEMINI_SAFETY_SETTING", "BLOCK_NONE")
-
+var ChannelSelectorStrategy = env.String("CHANNEL_SELECTOR_STRATEGY", "default")
+var ChannelSelectorStrategyModels = env.String("CHANNEL_SELECTOR_STRATEGY_MODELS", "")
 var Theme = env.String("THEME", "default")
 var ValidThemes = map[string]bool{
 	"default": true,
