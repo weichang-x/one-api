@@ -187,9 +187,10 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 			}
+			// 请求结束后更新配额信息
+			updateQuotaAfterRequest(c, channel, requestModel)
 		})
-		// 请求结束后使用Redis原子操作更新配额信息
-		updateQuotaAfterRequest(c, channel, requestModel)
+
 	}
 }
 
