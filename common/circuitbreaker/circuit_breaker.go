@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -22,11 +23,11 @@ const (
 
 // Config represents the configuration for the circuit breaker
 type Config struct {
-	FailureThreshold   int     `json:"failure_threshold"`    // Number of consecutive failures before opening
+	FailureThreshold   int32   `json:"failure_threshold"`    // Number of consecutive failures before opening
 	ErrorRateThreshold float64 `json:"error_rate_threshold"` // Error rate threshold (0.0-1.0)
 	SlowCallDuration   int     `json:"slow_call_duration"`   // Duration in ms to consider a call as slow
 	CooldownPeriod     int     `json:"cooldown_period"`      // Period in seconds before transitioning from OPEN to HALF_OPEN
-	HalfOpenMaxCalls   int     `json:"half_open_max_calls"`  // Maximum number of calls allowed in HALF_OPEN state
+	HalfOpenMaxCalls   int32   `json:"half_open_max_calls"`  // Maximum number of calls allowed in HALF_OPEN state
 }
 
 // DefaultConfig returns the default configuration
@@ -45,19 +46,19 @@ type CircuitBreaker struct {
 	channelId     int
 	state         State
 	config        *Config
-	failureCount  int
+	failureCount  int32
 	lastFailure   time.Time
-	halfOpenCalls int
+	halfOpenCalls int32
 	mu            sync.RWMutex
 }
 
 // CircuitBreakerMetrics represents the metrics for circuit breaker decisions
 type CircuitBreakerMetrics struct {
-	TotalCalls   int     `json:"total_calls"`
-	FailureCalls int     `json:"failure_calls"`
+	TotalCalls   int32   `json:"total_calls"`
+	FailureCalls int32   `json:"failure_calls"`
 	ErrorRate    float64 `json:"error_rate"`
 	LastFailure  int64   `json:"last_failure"`
-	SlowCalls    int     `json:"slow_calls"`
+	SlowCalls    int32   `json:"slow_calls"`
 }
 
 const (
@@ -122,7 +123,7 @@ func (cb *CircuitBreaker) RecordSuccess() error {
 
 	switch state {
 	case StateHalfOpen:
-		cb.halfOpenCalls++
+		atomic.AddInt32(&cb.halfOpenCalls, 1)
 		if cb.halfOpenCalls >= cb.config.HalfOpenMaxCalls {
 			return cb.setState(StateClosed)
 		}
@@ -140,7 +141,7 @@ func (cb *CircuitBreaker) RecordFailure() error {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
-	cb.failureCount++
+	atomic.AddInt32(&cb.failureCount, 1)
 	cb.lastFailure = time.Now()
 
 	// Update metrics
@@ -230,12 +231,12 @@ func (cb *CircuitBreaker) updateMetrics(success bool, duration int64) error {
 		return err
 	}
 
-	metrics.TotalCalls++
+	atomic.AddInt32(&metrics.TotalCalls, 1)
 	if !success {
-		metrics.FailureCalls++
+		atomic.AddInt32(&metrics.FailureCalls, 1)
 	}
 	if duration > int64(cb.config.SlowCallDuration) {
-		metrics.SlowCalls++
+		atomic.AddInt32(&metrics.SlowCalls, 1)
 	}
 	metrics.ErrorRate = float64(metrics.FailureCalls) / float64(metrics.TotalCalls)
 	metrics.LastFailure = time.Now().Unix()

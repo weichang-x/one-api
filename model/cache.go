@@ -227,6 +227,8 @@ func SyncChannelCache(frequency int) {
 
 func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
 	if !config.MemoryCacheEnabled {
+		// 如果内存缓存未启用，则直接从数据库获取
+		fmt.Println("get random satisfied channel from database")
 		return GetRandomSatisfiedChannel(group, model, ignoreFirstPriority)
 	}
 	channelSyncLock.RLock()

@@ -14,6 +14,7 @@ import (
 	"github.com/songquanpeng/one-api/common/circuitbreaker"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/random"
 	"github.com/songquanpeng/one-api/model"
@@ -36,6 +37,7 @@ type ModelRequest struct {
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
+		requestId := c.GetString(helper.RequestIdKey)
 		userId := c.GetInt(ctxkey.Id)
 		userGroup, _ := model.CacheGetUserGroup(userId)
 		c.Set(ctxkey.Group, userGroup)
@@ -118,37 +120,40 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 			} else {
-				// 获取可用渠道
-				availableChannels := model.GetAvailableChannels(userGroup, requestModel)
-				if len(availableChannels) == 0 {
-					message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
-					abortWithMessage(c, http.StatusServiceUnavailable, message)
-					return
-				}
-				if config.CircuitBreakerEnabled {
-					// Filter channels through circuit breaker
-					availableChannels, err := circuitBreakerManager.GetAvailableChannels(availableChannels)
-					if err != nil {
-						logger.SysError(fmt.Sprintf("Failed to filter channels through circuit breaker: %v", err))
-					} else if len(availableChannels) == 0 {
-						abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
+				// 使用Redis分布式锁确保选择渠道时只有一个请求在执行
+				common.NewRedisLock(common.GetChannelSelectLockKey(requestId), func() {
+					// 获取可用渠道
+					availableChannels := model.GetAvailableChannels(userGroup, requestModel)
+					if len(availableChannels) == 0 {
+						message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
+						abortWithMessage(c, http.StatusServiceUnavailable, message)
 						return
 					}
-				}
-
-				// 使用选择策略选择渠道
-				var err error
-				channel, err = selector.SelectChannel(availableChannels, c)
-				if err != nil {
-					logger.SysError(fmt.Sprintf("select channel with strategy %s error: %v", selector.Strategy(), err))
-					message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
-					if channel != nil {
-						logger.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
-						message = "数据库一致性已被破坏，请联系管理员"
+					if config.CircuitBreakerEnabled {
+						// Filter channels through circuit breaker
+						availableChannels, err := circuitBreakerManager.GetAvailableChannels(availableChannels)
+						if err != nil {
+							logger.SysError(fmt.Sprintf("Failed to filter channels through circuit breaker: %v", err))
+						} else if len(availableChannels) == 0 {
+							abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
+							return
+						}
 					}
-					abortWithMessage(c, http.StatusServiceUnavailable, message)
-					return
-				}
+
+					// 使用选择策略选择渠道
+					var err error
+					channel, err = selector.SelectChannel(availableChannels, c)
+					if err != nil {
+						logger.SysError(fmt.Sprintf("select channel with strategy %s error: %v", selector.Strategy(), err))
+						message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
+						if channel != nil {
+							logger.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
+							message = "数据库一致性已被破坏，请联系管理员"
+						}
+						abortWithMessage(c, http.StatusServiceUnavailable, message)
+						return
+					}
+				})
 			}
 
 			if selector != nil {
@@ -163,26 +168,27 @@ func Distribute() func(c *gin.Context) {
 
 		// 继续处理请求
 		c.Next()
+		// 使用Redis分布式锁确保更新熔断器状态时只有一个请求在执行
+		common.NewRedisLock(common.GetCircuitBreakerManagerLockKey(channel.Id), func() {
+			if config.CircuitBreakerEnabled {
+				// 获取响应状态码
+				statusCode := c.Writer.Status()
 
-		if config.CircuitBreakerEnabled {
-			// 获取响应状态码
-			statusCode := c.Writer.Status()
-
-			// 根据响应状态码更新熔断器状态
-			if statusCode >= 500 {
-				err := circuitBreakerManager.RecordFailure(channel.Id)
-				if err != nil {
-					logger.SysError(fmt.Sprintf("Failed to record failure in circuit breaker: %v", err))
-				}
-			} else if statusCode < 500 && statusCode >= 200 {
-				err := circuitBreakerManager.RecordSuccess(channel.Id)
-				if err != nil {
-					logger.SysError(fmt.Sprintf("Failed to record success in circuit breaker: %v", err))
+				// 根据响应状态码更新熔断器状态
+				if statusCode >= 500 {
+					err := circuitBreakerManager.RecordFailure(channel.Id)
+					if err != nil {
+						logger.SysError(fmt.Sprintf("Failed to record failure in circuit breaker: %v", err))
+					}
+				} else if statusCode < 500 && statusCode >= 200 {
+					err := circuitBreakerManager.RecordSuccess(channel.Id)
+					if err != nil {
+						logger.SysError(fmt.Sprintf("Failed to record success in circuit breaker: %v", err))
+					}
 				}
 			}
-		}
-
-		// 请求结束后更新配额信息
+		})
+		// 请求结束后使用Redis原子操作更新配额信息
 		updateQuotaAfterRequest(c, channel, requestModel)
 	}
 }
@@ -249,17 +255,16 @@ func getQuotaHeader(c *gin.Context, requestModel string) *common.ChannelQuota {
 // 根据响应头更新配额信息
 func updateQuotaAfterRequest(c *gin.Context, channel *model.Channel, requestModel string) {
 	// 获取响应头中的配额信息
-	quota := getQuotaHeader(c, requestModel)
-	if quota == nil {
+	newQuota := getQuotaHeader(c, requestModel)
+	if newQuota == nil {
 		return
 	}
 
-	// 更新 Redis 中的配额信息
-	err := common.UpdateChannelQuota(channel.Id, quota)
+	// 使用Redis原子操作更新配额信息
+	err := common.UpdateChannelQuota(channel.Id, newQuota)
 	if err != nil {
 		logger.SysError(fmt.Sprintf("Failed to update channel quota: %v", err))
 	}
-
 }
 
 func parseQuotaHeader(c *gin.Context, header string) int64 {

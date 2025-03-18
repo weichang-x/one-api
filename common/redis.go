@@ -3,6 +3,8 @@ package common
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -76,4 +78,81 @@ func RedisSetWithExpiration(key string, value string, expiration time.Duration) 
 		return errors.New("redis client is nil")
 	}
 	return RDB.Set(context.Background(), key, value, expiration).Err()
+}
+
+type RedisLock struct {
+	client    *redis.Client
+	key       string
+	value     string
+	expire    time.Duration
+	cancelCtx context.Context
+	cancel    context.CancelFunc
+}
+
+func newRedisLock(client *redis.Client, key string, expire time.Duration) *RedisLock {
+	return &RedisLock{
+		client: client,
+		key:    key,
+		value:  fmt.Sprintf("%d", time.Now().UnixNano()),
+		expire: expire,
+	}
+}
+
+// Acquire 尝试获取锁
+func (rl *RedisLock) Acquire() bool {
+	ctx := context.Background()
+	// 使用 SET NX EX 命令尝试获取锁
+	result, err := rl.client.SetNX(ctx, rl.key, rl.value, rl.expire).Result()
+	if err != nil {
+		logger.SysError(fmt.Sprintf("Failed to acquire lock: %v", err))
+		return false
+	}
+	if result {
+		// 创建一个可取消的上下文，用于续期
+		rl.cancelCtx, rl.cancel = context.WithCancel(ctx)
+		go rl.renewLock()
+	}
+	return result
+}
+
+// Release 释放锁
+func (rl *RedisLock) Release() {
+	// 取消续期
+	if rl.cancel != nil {
+		rl.cancel()
+	}
+
+	ctx := context.Background()
+	// 使用 Lua 脚本来确保只有锁的持有者才能释放锁
+	script := `
+	if redis.call("get", KEYS[1]) == ARGV[1] then
+		return redis.call("del", KEYS[1])
+	else
+		return 0
+	end`
+	_, err := rl.client.Eval(ctx, script, []string{rl.key}, rl.value).Result()
+	if err != nil {
+		logger.SysError(fmt.Sprintf("Failed to release lock: %v", err))
+	}
+}
+
+// renewLock 续期锁
+func (rl *RedisLock) renewLock() {
+	ticker := time.NewTicker(rl.expire / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			ctx := context.Background()
+			// 使用 EXPIRE 命令续期锁
+			_, err := rl.client.Expire(ctx, rl.key, rl.expire).Result()
+			if err != nil {
+				log.Printf("Failed to renew lock: %v", err)
+				return
+			}
+		case <-rl.cancelCtx.Done():
+			return
+		}
+	}
 }
