@@ -20,7 +20,8 @@ const (
 type Channel struct {
 	Id                 int     `json:"id"`
 	Type               int     `json:"type" gorm:"default:0"`
-	Key                string  `json:"key" gorm:"type:text"`
+	Key                string  `json:"key" gorm:"type:varchar(255);index:idx_uk_key,unique:true;not null"`
+	KeyLevel           int     `json:"key_level" gorm:"default:1"`
 	Status             int     `json:"status" gorm:"default:1"`
 	Name               string  `json:"name" gorm:"index"`
 	Weight             *uint   `json:"weight" gorm:"default:0"`
@@ -85,7 +86,7 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 func BatchInsertChannels(channels []Channel) error {
 	var err error
 	err = DB.Create(&channels).Error
-	if err != nil {
+	if err != nil && err != gorm.ErrDuplicatedKey {
 		return err
 	}
 	for _, channel_ := range channels {
