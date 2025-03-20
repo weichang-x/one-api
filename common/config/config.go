@@ -109,13 +109,17 @@ var RequestInterval = time.Duration(requestInterval) * time.Second
 
 var SyncFrequency = env.Int("SYNC_FREQUENCY", 10*60) // unit is second
 
+// 通道配额阈值配置
+var MinTokenConsumptionThreshold = env.Int("MIN_TOKEN_CONSUMPTION_THRESHOLD", 1000) // 最小消耗token阈值
+var MaxConcurrentRequestsLimit = env.Int("MAX_CONCURRENT_REQUESTS_LIMIT", 3)        // 最大并发量
+
 var BatchUpdateEnabled = false
 var BatchUpdateInterval = env.Int("BATCH_UPDATE_INTERVAL", 5)
 
 var RelayTimeout = env.Int("RELAY_TIMEOUT", 0) // unit is second
 
 var GeminiSafetySetting = env.String("GEMINI_SAFETY_SETTING", "BLOCK_NONE")
-var ChannelSelectorStrategy = env.String("CHANNEL_SELECTOR_STRATEGY", "default")
+var ChannelStrategySelectEnabled = strings.ToLower(os.Getenv("CHANNEL_STRATEGY_SELECT_ENABLED")) == "true"
 var ChannelSelectorStrategyModels = env.String("CHANNEL_SELECTOR_STRATEGY_MODELS", "")
 var Theme = env.String("THEME", "default")
 var ValidThemes = map[string]bool{

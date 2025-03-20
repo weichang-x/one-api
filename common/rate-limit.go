@@ -1,8 +1,6 @@
 package common
 
 import (
-	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -69,60 +67,4 @@ func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration in
 		*(l.store[key]) = append(*(l.store[key]), now)
 	}
 	return true
-}
-
-type ChannelQuota struct {
-	RemainingTPM  int64 `json:"remaining_tpm"`  // 剩余每分钟令牌数
-	RemainingRPM  int64 `json:"remaining_rpm"`  // 剩余每分钟请求数
-	RemainingOTPM int64 `json:"remaining_otpm"` // 剩余每分钟输出令牌数
-	RemainingITPM int64 `json:"remaining_itpm"` // 剩余每分钟输入令牌数
-}
-
-// Redis key 格式设计
-const (
-	ChannelQuotaKeyPrefix = "channel:quota:"
-	QuotaExpiration       = 60 * time.Second // 1分钟过期
-)
-
-func GetChannelQuotaKey(channelId int) string {
-	return fmt.Sprintf("%s%d", ChannelQuotaKeyPrefix, channelId)
-}
-
-// 更新渠道配额信息
-func UpdateChannelQuota(channelId int, quota *ChannelQuota) error {
-	key := GetChannelQuotaKey(channelId)
-	data, err := json.Marshal(quota)
-	if err != nil {
-		return err
-	}
-	return RedisSet(key, string(data), QuotaExpiration)
-}
-
-// 获取渠道配额信息
-func GetChannelQuota(channelId int) (*ChannelQuota, error) {
-	key := GetChannelQuotaKey(channelId)
-	data, err := RedisGet(key)
-	if err != nil {
-		return nil, err
-	}
-
-	var quota ChannelQuota
-	err = json.Unmarshal([]byte(data), &quota)
-	return &quota, err
-}
-
-func GetChannelSelectLockKey(key string) string {
-	return fmt.Sprintf("channel_lock:%s", key)
-}
-func GetCircuitBreakerManagerLockKey(channelId int) string {
-	return fmt.Sprintf("circuit_breaker_manager_lock:%d", channelId)
-}
-
-// 使用 Redis 分布式锁执行回调函数
-func NewRedisLock(key string, callback func()) {
-	lock := newRedisLock(RDB, key, 10*time.Second)
-	if lock.Acquire() {
-		defer lock.Release()
-		callback()
-	}
 }

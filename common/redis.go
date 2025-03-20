@@ -80,6 +80,15 @@ func RedisSetWithExpiration(key string, value string, expiration time.Duration) 
 	return RDB.Set(context.Background(), key, value, expiration).Err()
 }
 
+// 使用 Redis 分布式锁执行回调函数
+func NewRedisLock(key string, callback func()) {
+	lock := newRedisLock(RDB, key, 10*time.Second)
+	if lock.Acquire() {
+		defer lock.Release()
+		callback()
+	}
+}
+
 type RedisLock struct {
 	client    *redis.Client
 	key       string

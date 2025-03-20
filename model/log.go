@@ -246,3 +246,16 @@ func SearchLogsByDayAndModel(userId, start, end int) (LogStatistics []*LogStatis
 
 	return LogStatistics, err
 }
+
+// GetLatestLogByChannelId 获取指定通道的最新日志
+func GetLatestLogByChannelId(channelId int) (*Log, error) {
+	var log Log
+	err := LOG_DB.Where("channel_id = ?", channelId).Order("created_at desc").First(&log).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &log, nil
+}

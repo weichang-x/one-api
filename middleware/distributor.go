@@ -3,31 +3,31 @@ package middleware
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis/v8"
-	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/circuitbreaker"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 )
 
 var (
 	circuitBreakerManager *circuitbreaker.Manager
+	strategySelector      *StrategySelector
 )
 
 func init() {
 	// Initialize circuit breaker manager with default config
 	circuitBreakerManager = circuitbreaker.NewManager(nil)
+	strategySelector = &StrategySelector{}
 }
 
 type ModelRequest struct {
@@ -37,7 +37,6 @@ type ModelRequest struct {
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		requestId := c.GetString(helper.RequestIdKey)
 		userId := c.GetInt(ctxkey.Id)
 		userGroup, _ := model.CacheGetUserGroup(userId)
 		c.Set(ctxkey.Group, userGroup)
@@ -74,24 +73,19 @@ func Distribute() func(c *gin.Context) {
 			}
 		} else {
 			requestModel = c.GetString(ctxkey.RequestModel)
-			// 设置渠道选择策略
-			strategy := "default"
 			// 对于 Claude 和 GPT 模型使用配置文件中指定的渠道选择策略
 			// 这样可以对这些主流模型进行更细粒度的负载均衡控制
 			if strings.HasPrefix(requestModel, "claude") || strings.HasPrefix(requestModel, "gpt") {
-				strategy = config.ChannelSelectorStrategy
+				config.ChannelStrategySelectEnabled = true
 			}
 
 			// 如果请求模型在使用配置策略模型列表中，则使用配置策略
-			// 这样可以进行更细粒度的负载均衡控制
 			if isModelInList(requestModel, config.ChannelSelectorStrategyModels) {
-				strategy = config.ChannelSelectorStrategy
+				config.ChannelStrategySelectEnabled = true
 			}
 
-			// 获取选择策略
-			selector := getChannelSelector(strategy)
-			//默认随机策略（保持现有逻辑）
-			if selector == nil {
+			if !config.ChannelStrategySelectEnabled {
+				// 默认随机策略
 				var err error
 				channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, requestModel, false)
 				if err != nil {
@@ -120,77 +114,77 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 			} else {
-				// 使用Redis分布式锁确保选择渠道时只有一个请求在执行
-				common.NewRedisLock(common.GetChannelSelectLockKey(requestId), func() {
-					// 获取可用渠道
-					availableChannels := model.GetAvailableChannels(userGroup, requestModel)
-					if len(availableChannels) == 0 {
-						message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
-						abortWithMessage(c, http.StatusServiceUnavailable, message)
-						return
-					}
-					if config.CircuitBreakerEnabled {
-						// Filter channels through circuit breaker
-						availableChannels, err := circuitBreakerManager.GetAvailableChannels(availableChannels)
-						if err != nil {
-							logger.SysError(fmt.Sprintf("Failed to filter channels through circuit breaker: %v", err))
-						} else if len(availableChannels) == 0 {
-							abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
-							return
-						}
-					}
-
-					// 使用选择策略选择渠道
-					var err error
-					channel, err = selector.SelectChannel(availableChannels, c)
+				// 获取可用渠道
+				availableChannels := model.GetAvailableChannels(userGroup, requestModel)
+				if len(availableChannels) == 0 {
+					message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
+					abortWithMessage(c, http.StatusServiceUnavailable, message)
+					return
+				}
+				if config.CircuitBreakerEnabled {
+					// Filter channels through circuit breaker
+					availableChannels, err := circuitBreakerManager.GetAvailableChannels(availableChannels)
 					if err != nil {
-						logger.SysError(fmt.Sprintf("select channel with strategy %s error: %v", selector.Strategy(), err))
-						message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
-						if channel != nil {
-							logger.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
-							message = "数据库一致性已被破坏，请联系管理员"
-						}
-						abortWithMessage(c, http.StatusServiceUnavailable, message)
+						logger.SysError(fmt.Sprintf("Failed to filter channels through circuit breaker: %v", err))
+					} else if len(availableChannels) == 0 {
+						abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
 						return
 					}
-				})
+				}
+				var err error
+				channel, err = strategySelector.SelectChannel(availableChannels, c)
+				if err != nil {
+					abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
+					return
+				}
+
 			}
 
-			if selector != nil {
-				strategy = selector.Strategy()
-			}
-			logger.Infof(ctx, "user id %d, user group: %s, request model: %s, select channel strategy: %s, using channel #%d", userId, userGroup, requestModel, strategy, channel.Id)
+			logger.Infof(ctx, "user id %d, user group: %s, request model: %s, select channel strategy_enable: %v, using channel #%d", userId, userGroup, requestModel, config.ChannelStrategySelectEnabled, channel.Id)
 		}
 
 		logger.Debugf(ctx, "user id %d, user group: %s, request model: %s, using channel #%d", userId, userGroup, requestModel, channel.Id)
+
 		// 设置上下文并继续处理请求
 		SetupContextForSelectedChannel(c, channel, requestModel)
 
 		// 继续处理请求
 		c.Next()
-		// 使用Redis分布式锁确保更新熔断器状态时只有一个请求在执行
-		common.NewRedisLock(common.GetCircuitBreakerManagerLockKey(channel.Id), func() {
-			if config.CircuitBreakerEnabled {
-				// 获取响应状态码
-				statusCode := c.Writer.Status()
+		group := sync.WaitGroup{}
+		group.Add(2)
 
-				// 根据响应状态码更新熔断器状态
-				if statusCode >= 500 {
-					err := circuitBreakerManager.RecordFailure(channel.Id)
-					if err != nil {
-						logger.SysError(fmt.Sprintf("Failed to record failure in circuit breaker: %v", err))
-					}
-				} else if statusCode < 500 && statusCode >= 200 {
-					err := circuitBreakerManager.RecordSuccess(channel.Id)
-					if err != nil {
-						logger.SysError(fmt.Sprintf("Failed to record success in circuit breaker: %v", err))
-					}
+		// 获取响应头中的配额信息
+		quota := getQuotaHeader(c, channel.Type, int64(channel.Id))
+		logger.Infof(ctx, "model: %s, using channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d, Level: %d", requestModel, channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel.Type), quota.RemainingTokensResetTime(channel.Type), channel.KeyLevel)
+		// 更新账户等级
+		go func() {
+			model.UpdateChannelKeyLevel(int64(channel.Id), channel.Type, quota.RPM, quota.TPM, requestModel)
+			group.Done()
+		}()
+
+		if config.CircuitBreakerEnabled {
+			// 获取响应状态码
+			statusCode := c.Writer.Status()
+
+			// 根据响应状态码更新熔断器状态
+			if statusCode >= 500 {
+				err := circuitBreakerManager.RecordFailure(channel.Id)
+				if err != nil {
+					logger.SysError(fmt.Sprintf("Failed to record failure in circuit breaker: %v", err))
+				}
+			} else if statusCode < 500 && statusCode >= 200 {
+				err := circuitBreakerManager.RecordSuccess(channel.Id)
+				if err != nil {
+					logger.SysError(fmt.Sprintf("Failed to record success in circuit breaker: %v", err))
 				}
 			}
-			// 请求结束后更新配额信息
-			updateQuotaAfterRequest(c, channel, requestModel)
-		})
-
+		}
+		// 请求结束后更新实际配额信息
+		go func() {
+			updateQuotaAfterRequest(c, quota, userGroup, requestModel)
+			group.Done()
+		}()
+		group.Wait()
 	}
 }
 
@@ -235,40 +229,65 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 }
 
 // 根据请求模型获取响应头配额信息
-// 返回值为nil表示不支持该模型
-func getQuotaHeader(c *gin.Context, requestModel string) *common.ChannelQuota {
-	if strings.HasPrefix(requestModel, "claude") {
-		return &common.ChannelQuota{
-			RemainingTPM:  parseQuotaHeader(c, "anthropic-ratelimit-tokens-remaining"),
-			RemainingRPM:  parseQuotaHeader(c, "anthropic-ratelimit-requests-remaining"),
-			RemainingOTPM: parseQuotaHeader(c, "anthropic-ratelimit-output-tokens-remaining"),
-			RemainingITPM: parseQuotaHeader(c, "anthropic-ratelimit-input-tokens-remaining"),
+func getQuotaHeader(c *gin.Context, channelType int, channelId int64) *model.ChannelQuota {
+	if channelType == channeltype.Anthropic {
+		return &model.ChannelQuota{
+			ChannelId:     channelId,
+			RemainingTPM:  parseQuotaHeaderInt64(c, "anthropic-ratelimit-tokens-remaining"),
+			RemainingRPM:  parseQuotaHeaderInt64(c, "anthropic-ratelimit-requests-remaining"),
+			RemainingOTPM: parseQuotaHeaderInt64(c, "anthropic-ratelimit-output-tokens-remaining"),
+			RemainingITPM: parseQuotaHeaderInt64(c, "anthropic-ratelimit-input-tokens-remaining"),
+			TPM:           parseQuotaHeaderInt64(c, "anthropic-ratelimit-tokens-limit"),
+			OTPM:          parseQuotaHeaderInt64(c, "anthropic-ratelimit-output-tokens-limit"),
+			ITPM:          parseQuotaHeaderInt64(c, "anthropic-ratelimit-input-tokens-limit"),
+			RPM:           parseQuotaHeaderInt64(c, "anthropic-ratelimit-requests-limit"),
+			ResetTimeOTPM: parseQuotaRFC3339ResetTime(c, "anthropic-ratelimit-output-tokens-reset"), //'2025-03-20T01:42:59Z'
+			// ResetTimeTPM:  parseQuotaRFC3339ResetTime(c, "anthropic-ratelimit-tokens-reset"),
 		}
-	} else if strings.HasPrefix(requestModel, "gpt") {
-		return &common.ChannelQuota{
-			RemainingTPM: parseQuotaHeader(c, "x-ratelimit-remaining-tokens"),
-			RemainingRPM: parseQuotaHeader(c, "x-ratelimit-remaining-requests"),
+	} else if channelType == channeltype.OpenAI {
+		return &model.ChannelQuota{
+			ChannelId:    channelId,
+			RemainingTPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-tokens"),
+			RemainingRPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-requests"),
+			TPM:          parseQuotaHeaderInt64(c, "x-ratelimit-limit-tokens"),
+			RPM:          parseQuotaHeaderInt64(c, "x-ratelimit-limit-requests"),
+			ResetTimeTPM: parseQuotaDurationResetTime(c, "x-ratelimit-reset-tokens"), //'1m6s'
 		}
 	}
-	return nil
+
+	return &model.ChannelQuota{
+		ChannelId:    channelId,
+		RemainingTPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-tokens"),
+		RemainingRPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-requests"),
+		TPM:          parseQuotaHeaderInt64(c, "x-ratelimit-limit-tokens"),
+		RPM:          parseQuotaHeaderInt64(c, "x-ratelimit-limit-requests"),
+		ResetTimeTPM: parseQuotaDurationResetTime(c, "x-ratelimit-reset-tokens"),
+	}
 }
 
 // 根据响应头更新配额信息
-func updateQuotaAfterRequest(c *gin.Context, channel *model.Channel, requestModel string) {
-	// 获取响应头中的配额信息
-	newQuota := getQuotaHeader(c, requestModel)
-	if newQuota == nil {
+func updateQuotaAfterRequest(c *gin.Context, quota *model.ChannelQuota, userGroup, requestModel string) {
+	// 获取最新请求响应时间
+	latestLog, err := model.GetLatestLogByChannelId(int(quota.ChannelId))
+	if err != nil {
+		logger.SysError(fmt.Sprintf("Failed to get latest log: %v", err))
 		return
 	}
 
-	// 使用Redis原子操作更新配额信息
-	err := common.UpdateChannelQuota(channel.Id, newQuota)
-	if err != nil {
-		logger.SysError(fmt.Sprintf("Failed to update channel quota: %v", err))
+	// 检查当前响应时间是否大于等于最新请求响应时间
+	currentTime := time.Now().Unix()
+	if latestLog != nil && currentTime >= latestLog.CreatedAt {
+		// 使用内存存储更新配额信息
+		err := model.UpdateChannelQuota(userGroup, requestModel, quota)
+		if err != nil {
+			logger.SysError(fmt.Sprintf("Failed to update channel quota: %v", err))
+		}
+	} else {
+		logger.Warnf(c, "当前响应时间小于最新请求响应时间不更新配额 channel #%d", quota.ChannelId)
 	}
 }
 
-func parseQuotaHeader(c *gin.Context, header string) int64 {
+func parseQuotaHeaderInt64(c *gin.Context, header string) int64 {
 	value := c.Writer.Header().Get(header)
 	if value == "" {
 		return 0
@@ -277,123 +296,149 @@ func parseQuotaHeader(c *gin.Context, header string) int64 {
 	return quota
 }
 
-// 获取选择器
-func getChannelSelector(strategy string) ChannelSelector {
-	// 从请求参数或配置中获取选择策略
-	switch strategy {
-	case "quota_round_robin":
-		return NewQuotaRoundRobinSelector()
-	case "min_request":
-		return NewMinRequestSelector()
+// 解析时间间隔 '1m6s' 返回 时间戳=当前时间+
+func parseQuotaDurationResetTime(c *gin.Context, header string) int64 {
+	value := c.Writer.Header().Get(header)
+	if value == "" {
+		return 0
 	}
-	return nil
+	resetTime, _ := time.ParseDuration(value)
+	return time.Now().Unix() + int64(resetTime)
 }
 
-// =======channel selector========
-
-type ChannelSelector interface {
-	SelectChannel(channels []*model.Channel, ctx *gin.Context) (*model.Channel, error)
-	Strategy() string
+// 解析字符串时间格式 '2025-03-20T01:42:59Z'
+func parseQuotaRFC3339ResetTime(c *gin.Context, header string) int64 {
+	value := c.Writer.Header().Get(header)
+	if value == "" {
+		return 0
+	}
+	quota, _ := time.Parse(time.RFC3339, value)
+	return quota.Unix()
 }
 
-// 剩余配额轮询策略
-type QuotaRoundRobinSelector struct{}
-
-func NewQuotaRoundRobinSelector() ChannelSelector {
-	return &QuotaRoundRobinSelector{}
+// 策略
+type StrategySelector struct {
+	mu sync.Mutex
+	wg sync.WaitGroup
 }
 
-func (s *QuotaRoundRobinSelector) Strategy() string {
-	return "quota_round_robin"
-}
+func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Context) (*model.Channel, error) {
+	// 等待前面的请求完成
+	s.wg.Wait()
 
-func (s *QuotaRoundRobinSelector) SelectChannel(channels []*model.Channel, ctx *gin.Context) (*model.Channel, error) {
-	maxQuota := int64(0)
-	selectedChannel := (*model.Channel)(nil)
-	availableChannels := make([]*model.Channel, 0)
+	// 添加新的等待组
+	s.wg.Add(1)
+	defer s.wg.Done()
 
-	getQuota := func(quota *common.ChannelQuota) int64 {
-		if quota.RemainingOTPM > 0 {
-			return quota.RemainingOTPM
+	// 获取互斥锁
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 捕获异常，防止程序崩溃而导致互斥锁没有释放
+	defer func() {
+		if r := recover(); r != nil {
+			logger.SysError(fmt.Sprintf("Failed to select channel recover panic: %v", r))
 		}
-		return quota.RemainingTPM
+	}()
+
+	if len(channels) == 0 {
+		return nil, errors.New("no available channels")
 	}
 
+	// 获取当前时间和请求参数
+	userGroup := ctx.GetString(ctxkey.Group)
+	requestModel := ctx.GetString(ctxkey.RequestModel)
+
+	// 分类通道：重置时间已到和未到的通道
+	var channelsA, channelsB []*model.Channel
 	for _, channel := range channels {
-		quota, err := common.GetChannelQuota(channel.Id)
-		if err != nil {
-			if err == redis.Nil {
-				availableChannels = append(availableChannels, channel)
-				continue
-			}
-			// logger.SysLogf(fmt.Sprintf("Failed to get channel quota: %v", err))
+		quota, err := model.GetChannelQuota(userGroup, requestModel, int64(channel.Id))
+		if err != nil || quota == nil {
 			continue
 		}
-		remainingQuota := getQuota(quota)
-		if remainingQuota > maxQuota {
-			maxQuota = remainingQuota
-			selectedChannel = channel
+
+		// 检查重置时间是否已到
+		if quota.IsExpired(channel.Type) {
+			channelsA = append(channelsA, channel)
+		} else {
+			channelsB = append(channelsB, channel)
 		}
 	}
 
-	if selectedChannel == nil && len(availableChannels) > 0 {
-		if len(availableChannels) == 1 {
-			return availableChannels[0], nil
+	// 如果重置时间已到的通道列表不为空，选择第一个通道
+	if len(channelsA) > 0 {
+		selectedChannel := channelsA[0]
+		quota, err := model.GetChannelQuota(userGroup, requestModel, int64(selectedChannel.Id))
+		if err == nil && quota != nil {
+			logger.Infof(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel.Type), quota.RemainingTokensResetTime(selectedChannel.Type))
+
+			// 预扣除配额
+			quota.DeductTokens(selectedChannel.Type, int64(config.MinTokenConsumptionThreshold))
+			quota.DeductRPM(1)
+			// 预估下次重置时间
+			resetTime := EstimateNextResetTime(selectedChannel.Type, quota, requestModel)
+			quota.UpdateResetTime(selectedChannel.Type, resetTime)
+			logger.Infof(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel.Type), quota.RemainingTokensResetTime(selectedChannel.Type))
+			// 更新内存中的配额信息
+			model.UpdateChannelQuota(userGroup, requestModel, quota)
+			return selectedChannel, nil
 		}
-		randomIndex := random.RandRange(0, len(availableChannels)-1)
-		selectedChannel = availableChannels[randomIndex]
-		return selectedChannel, nil
 	}
 
-	if selectedChannel == nil {
-		return nil, errors.New("no available channel with sufficient quota")
-	}
-	return selectedChannel, nil
-}
+	// 对channelsB按剩余OTPM/TPM排序
+	sort.Slice(channelsB, func(i, j int) bool {
+		quotaI, _ := model.GetChannelQuota(userGroup, requestModel, int64(channelsB[i].Id))
+		quotaJ, _ := model.GetChannelQuota(userGroup, requestModel, int64(channelsB[j].Id))
+		if quotaI == nil || quotaJ == nil {
+			return false
+		}
+		return quotaI.RemainingTokens(channelsB[i].Type) > quotaJ.RemainingTokens(channelsB[j].Type)
+	})
 
-// 最小请求数策略
-type MinRequestSelector struct{}
-
-func NewMinRequestSelector() ChannelSelector {
-	return &MinRequestSelector{}
-}
-
-func (s *MinRequestSelector) Strategy() string {
-	return "min_request"
-}
-
-func (s *MinRequestSelector) SelectChannel(channels []*model.Channel, ctx *gin.Context) (*model.Channel, error) {
-	minRequests := int64(math.MaxInt64)
-	selectedChannel := (*model.Channel)(nil)
-	availableChannels := make([]*model.Channel, 0)
-
-	for _, channel := range channels {
-		quota, err := common.GetChannelQuota(channel.Id)
-		if err != nil {
-			if err == redis.Nil {
-				availableChannels = append(availableChannels, channel)
-				continue
-			}
-			// logger.SysLogf(fmt.Sprintf("Failed to get channel quota: %v", err))
+	// 遍历排序后的通道列表，第一个通道剩余OTPM/TPM最大
+	for index, channel := range channelsB {
+		quota, err := model.GetChannelQuota(userGroup, requestModel, int64(channel.Id))
+		if err != nil || quota == nil {
 			continue
 		}
-		if quota.RemainingRPM < minRequests {
-			minRequests = quota.RemainingRPM
-			selectedChannel = channel
+
+		// 如果第一个通道的配额已经小于最小消耗token阈值，则没有可用通道
+		if index == 0 && quota.RemainingTokens(channel.Type) <= int64(config.MinTokenConsumptionThreshold) {
+			break
+		}
+
+		// 通道配额大于等于最小消耗token阈值 并且 当前并发量小于等于最大并发量
+		if quota.RemainingTokens(channel.Type) >= int64(config.MinTokenConsumptionThreshold) && (quota.TotalRequests()-quota.RemainingRequests()) <= int64(config.MaxConcurrentRequestsLimit) {
+			logger.Infof(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel.Type), quota.RemainingTokensResetTime(channel.Type))
+
+			// 预扣除配额
+			quota.DeductTokens(channel.Type, int64(config.MinTokenConsumptionThreshold))
+			quota.DeductRPM(1)
+			// 预估下次重置时间
+			resetTime := EstimateNextResetTime(channel.Type, quota, requestModel)
+			quota.UpdateResetTime(channel.Type, resetTime)
+			logger.Infof(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel.Type), quota.RemainingTokensResetTime(channel.Type))
+			// 更新内存中的配额信息
+			model.UpdateChannelQuota(userGroup, requestModel, quota)
+			return channel, nil
 		}
 	}
 
-	if selectedChannel == nil && len(availableChannels) > 0 {
-		if len(availableChannels) == 1 {
-			return availableChannels[0], nil
-		}
-		randomIndex := random.RandRange(0, len(availableChannels)-1)
-		selectedChannel = availableChannels[randomIndex]
-		return selectedChannel, nil
-	}
+	return nil, errors.New("no available channel with sufficient quota")
+}
 
-	if selectedChannel == nil {
-		return nil, errors.New("no available channel")
+func EstimateNextResetTime(channelType int, quota *model.ChannelQuota, requestModel string) int64 {
+	ResetTimeWindowOpenAI := int64(180)
+	ResetTimeWindowClaude := int64(10)
+	ResetTimeWindow := int64(60)
+	// 根据通道类型使用特定规则
+	switch channelType {
+	case channeltype.OpenAI:
+		// OpenAI 使用滚动窗口
+		return quota.ResetTimeTPM + ResetTimeWindowOpenAI // 3分钟窗口
+	case channeltype.Anthropic:
+		// Claude 可能有更长的窗口
+		return quota.ResetTimeOTPM + ResetTimeWindowClaude // 10s窗口
 	}
-	return selectedChannel, nil
+	return quota.ResetTimeTPM + ResetTimeWindow
 }
