@@ -57,7 +57,7 @@ var EmailDomainWhitelist = []string{
 var DebugEnabled = strings.ToLower(os.Getenv("DEBUG")) == "true"
 var DebugSQLEnabled = strings.ToLower(os.Getenv("DEBUG_SQL")) == "true"
 var MemoryCacheEnabled = strings.ToLower(os.Getenv("MEMORY_CACHE_ENABLED")) == "true"
-var CircuitBreakerEnabled = strings.ToLower(os.Getenv("CIRCUIT_BREAKER_ENABLED")) == "true"
+
 var LogConsumeEnabled = true
 
 var SMTPServer = ""
@@ -98,7 +98,7 @@ var AutomaticEnableChannelEnabled = false
 var QuotaRemindThreshold int64 = 1000
 var PreConsumedQuota int64 = 500
 var ApproximateTokenEnabled = false
-var RetryTimes = 0
+var RetryTimes = env.Int("RETRY_TIMES", 3)
 
 var RootUserEmail = ""
 
@@ -138,8 +138,14 @@ var RequestQueueTimeout = env.Int("REQUEST_QUEUE_TIMEOUT", 30)        // 请求�
 var RequestQueueMaxLength = env.Int("REQUEST_QUEUE_MAX_LENGTH", 1000) // 请求队列最大长度
 
 // 通道策略选择配置
-var ChannelStrategySelectEnabled = strings.ToLower(os.Getenv("CHANNEL_STRATEGY_SELECT_ENABLED")) == "true"
 var ChannelSelectorStrategyModels = env.String("CHANNEL_SELECTOR_STRATEGY_MODELS", "")
+
+// 熔断器配置
+var CircuitBreakerFailureThreshold = env.Int("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5)
+var CircuitBreakerErrorRateThreshold = env.Float64("CIRCUIT_BREAKER_ERROR_RATE_THRESHOLD", 0.6)
+var CircuitBreakerSlowCallDuration = env.Int("CIRCUIT_BREAKER_SLOW_CALL_DURATION", 2000)
+var CircuitBreakerCooldownPeriod = env.Int("CIRCUIT_BREAKER_COOLDOWN_PERIOD", 30)
+var CircuitBreakerHalfOpenMaxCalls = env.Int("CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS", 3)
 
 var BatchUpdateEnabled = false
 var BatchUpdateInterval = env.Int("BATCH_UPDATE_INTERVAL", 5)

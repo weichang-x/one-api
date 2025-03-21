@@ -63,13 +63,25 @@ func (m *Manager) GetAvailableChannels(channels []*model.Channel) ([]*model.Chan
 }
 
 // RecordSuccess records a successful request for the given channel
-func (m *Manager) RecordSuccess(channelId int) error {
+func (m *Manager) RecordSuccess(channelId int, duration int64) error {
 	cb := m.GetBreaker(channelId)
-	return cb.RecordSuccess()
+	return cb.RecordSuccess(duration)
 }
 
 // RecordFailure records a failed request for the given channel
 func (m *Manager) RecordFailure(channelId int) error {
 	cb := m.GetBreaker(channelId)
 	return cb.RecordFailure()
+}
+
+var (
+	circuitBreakerManager *Manager
+)
+
+func init() {
+	circuitBreakerManager = NewManager(nil)
+}
+
+func GetManager() *Manager {
+	return circuitBreakerManager
 }

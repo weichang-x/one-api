@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 )
 
@@ -33,11 +34,11 @@ type Config struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		FailureThreshold:   5,
-		ErrorRateThreshold: 0.6,
-		SlowCallDuration:   2000,
-		CooldownPeriod:     30,
-		HalfOpenMaxCalls:   3,
+		FailureThreshold:   int32(config.CircuitBreakerFailureThreshold),
+		ErrorRateThreshold: config.CircuitBreakerErrorRateThreshold,
+		SlowCallDuration:   config.CircuitBreakerSlowCallDuration,
+		CooldownPeriod:     config.CircuitBreakerCooldownPeriod,
+		HalfOpenMaxCalls:   int32(config.CircuitBreakerHalfOpenMaxCalls),
 	}
 }
 
@@ -47,7 +48,7 @@ type CircuitBreaker struct {
 	state         State
 	config        *Config
 	failureCount  int32
-	lastFailure   time.Time
+	lastFailure   int64
 	halfOpenCalls int32
 	mu            sync.RWMutex
 }
@@ -112,7 +113,8 @@ func (cb *CircuitBreaker) setState(state State) error {
 }
 
 // RecordSuccess records a successful call
-func (cb *CircuitBreaker) RecordSuccess() error {
+// duration 参数代表 API 调用的耗时，用于统计慢调用的次数
+func (cb *CircuitBreaker) RecordSuccess(duration int64) error {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -120,6 +122,10 @@ func (cb *CircuitBreaker) RecordSuccess() error {
 	if err != nil {
 		return err
 	}
+	logger.SysLog(fmt.Sprintf("CircuitBreaker RecordSuccess channel #%d state: %s", cb.channelId, state))
+
+	// Reset failure count on success
+	atomic.StoreInt32(&cb.failureCount, 0)
 
 	switch state {
 	case StateHalfOpen:
@@ -133,7 +139,7 @@ func (cb *CircuitBreaker) RecordSuccess() error {
 	}
 
 	// Update metrics
-	return cb.updateMetrics(true, 0)
+	return cb.updateMetrics(true, duration)
 }
 
 // RecordFailure records a failed call
@@ -142,30 +148,33 @@ func (cb *CircuitBreaker) RecordFailure() error {
 	defer cb.mu.Unlock()
 
 	atomic.AddInt32(&cb.failureCount, 1)
-	cb.lastFailure = time.Now()
+	atomic.StoreInt64(&cb.lastFailure, time.Now().Unix())
+	logger.SysLog(fmt.Sprintf("CircuitBreaker RecordFailure channel #%d failureCount: %d", cb.channelId, cb.failureCount))
 
 	// Update metrics
-	if err := cb.updateMetrics(false, 0); err != nil {
-		return err
-	}
+	metricsErr := cb.updateMetrics(false, 0)
 
+	// Get metrics for error rate check
 	metrics, err := cb.getMetrics()
 	if err != nil {
-		return err
+		metrics = &CircuitBreakerMetrics{} // Use empty metrics if can't get from Redis
 	}
 
 	// Check if we should open the circuit
 	if cb.shouldOpen(metrics) {
-		return cb.setState(StateOpen)
+		if err := cb.setState(StateOpen); err != nil {
+			logger.SysError(fmt.Sprintf("Failed to set circuit breaker state to OPEN: %v", err))
+		}
+		return fmt.Errorf("circuit breaker opened after %d consecutive failures", cb.failureCount)
 	}
 
-	return nil
+	return metricsErr // Return metrics error if any
 }
 
 // shouldOpen determines if the circuit should be opened based on metrics
 func (cb *CircuitBreaker) shouldOpen(metrics *CircuitBreakerMetrics) bool {
 	// Check consecutive failures
-	if cb.failureCount >= cb.config.FailureThreshold {
+	if atomic.LoadInt32(&cb.failureCount) >= cb.config.FailureThreshold {
 		return true
 	}
 
@@ -191,16 +200,16 @@ func (cb *CircuitBreaker) AllowRequest() (bool, error) {
 	case StateClosed:
 		return true, nil
 	case StateOpen:
-		if time.Since(cb.lastFailure) > time.Duration(cb.config.CooldownPeriod)*time.Second {
+		if time.Now().Unix()-atomic.LoadInt64(&cb.lastFailure) > int64(cb.config.CooldownPeriod) {
 			if err := cb.setState(StateHalfOpen); err != nil {
 				return false, err
 			}
-			cb.halfOpenCalls = 0
+			atomic.StoreInt32(&cb.halfOpenCalls, 0)
 			return true, nil
 		}
 		return false, nil
 	case StateHalfOpen:
-		return cb.halfOpenCalls < cb.config.HalfOpenMaxCalls, nil
+		return atomic.LoadInt32(&cb.halfOpenCalls) < cb.config.HalfOpenMaxCalls, nil
 	default:
 		return true, nil
 	}
@@ -234,18 +243,24 @@ func (cb *CircuitBreaker) updateMetrics(success bool, duration int64) error {
 	atomic.AddInt32(&metrics.TotalCalls, 1)
 	if !success {
 		atomic.AddInt32(&metrics.FailureCalls, 1)
+		atomic.StoreInt64(&metrics.LastFailure, time.Now().UnixMilli())
+		failures := atomic.LoadInt32(&metrics.FailureCalls)
+		total := atomic.LoadInt32(&metrics.TotalCalls)
+		if total > 0 {
+			metrics.ErrorRate = float64(failures) / float64(total)
+		}
 	}
+	// 慢调用
 	if duration > int64(cb.config.SlowCallDuration) {
 		atomic.AddInt32(&metrics.SlowCalls, 1)
 	}
-	metrics.ErrorRate = float64(metrics.FailureCalls) / float64(metrics.TotalCalls)
-	metrics.LastFailure = time.Now().Unix()
 
 	data, err := json.Marshal(metrics)
 	if err != nil {
 		return err
 	}
 
+	logger.SysLog(fmt.Sprintf("CircuitBreaker updateMetrics channel #%d metrics: %v", cb.channelId, metrics))
 	// Store metrics with 1 hour expiration
 	return common.RedisSetWithExpiration(key, string(data), time.Hour)
 }

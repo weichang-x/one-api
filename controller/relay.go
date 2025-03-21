@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/circuitbreaker"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/strategy"
 	"github.com/songquanpeng/one-api/middleware"
 	dbmodel "github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/monitor"
@@ -44,6 +47,7 @@ func relayHelper(c *gin.Context, relayMode int) *model.ErrorWithStatusCode {
 
 func Relay(c *gin.Context) {
 	ctx := c.Request.Context()
+	startTime := time.Now()
 	relayMode := relaymode.GetByPath(c.Request.URL.Path)
 	if config.DebugEnabled {
 		requestBody, _ := common.GetRequestBody(c)
@@ -52,7 +56,13 @@ func Relay(c *gin.Context) {
 	channelId := c.GetInt(ctxkey.ChannelId)
 	userId := c.GetInt(ctxkey.Id)
 	bizErr := relayHelper(c, relayMode)
+	duration := time.Since(startTime).Milliseconds()
 	if bizErr == nil {
+		// Record in circuit breaker
+		err := circuitbreaker.GetManager().RecordSuccess(channelId, duration)
+		if err != nil {
+			logger.SysError(fmt.Sprintf("Failed to record success in circuit breaker: %v", err))
+		}
 		monitor.Emit(channelId, true)
 		return
 	}
@@ -64,11 +74,46 @@ func Relay(c *gin.Context) {
 	requestId := c.GetString(helper.RequestIdKey)
 	retryTimes := config.RetryTimes
 	if !shouldRetry(c, bizErr.StatusCode) {
+		logger.Infof(ctx, "=====>bizErr.StatusCode: %d", bizErr.StatusCode)
+		// Record failure in circuit breaker
+		err := circuitbreaker.GetManager().RecordFailure(channelId)
+		if err != nil {
+			logger.SysError(fmt.Sprintf("Failed to record failure in circuit breaker: %v", err))
+		}
+
 		logger.Errorf(ctx, "relay error happen, status code is %d, won't retry in this case", bizErr.StatusCode)
 		retryTimes = 0
 	}
+	channelStrategyEnabled := c.GetBool(ctxkey.KeyChannelStrategyEnabled)
+	logger.Infof(ctx, "channelStrategyEnabled: %v", channelStrategyEnabled)
 	for i := retryTimes; i > 0; i-- {
-		channel, err := dbmodel.CacheGetRandomSatisfiedChannel(group, originalModel, i != retryTimes)
+		var channel *dbmodel.Channel
+		var err error
+		if channelStrategyEnabled {
+			// 使用策略选择渠道
+			availableChannels := dbmodel.GetAvailableChannels(group, originalModel)
+			if len(availableChannels) == 0 {
+				logger.Errorf(ctx, "当前分组 %s 下对于模型 %s 无可用渠道", group, originalModel)
+				break
+			}
+
+			// Filter channels through circuit breaker
+			availableChannels, err := circuitbreaker.GetManager().GetAvailableChannels(availableChannels)
+			if err != nil {
+				logger.SysError(fmt.Sprintf("Failed to filter channels through circuit breaker: %v", err))
+				break
+			}
+			if len(availableChannels) == 0 {
+				logger.Errorf(ctx, "所有渠道暂时不可用，请稍后重试")
+				break
+			}
+
+			channel, err = strategy.GetStrategySelector().SelectChannel(availableChannels, c)
+
+		} else {
+			// 使用随机渠道
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannel(group, originalModel, i != retryTimes)
+		}
 		if err != nil {
 			logger.Errorf(ctx, "CacheGetRandomSatisfiedChannel failed: %+v", err)
 			break
@@ -80,10 +125,24 @@ func Relay(c *gin.Context) {
 		middleware.SetupContextForSelectedChannel(c, channel, originalModel)
 		requestBody, err := common.GetRequestBody(c)
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
+		startTime := time.Now()
 		bizErr = relayHelper(c, relayMode)
+		duration := time.Since(startTime).Milliseconds()
 		if bizErr == nil {
+			// Record  in circuit breaker
+			err := circuitbreaker.GetManager().RecordSuccess(channelId, duration)
+			if err != nil {
+				logger.SysError(fmt.Sprintf("Failed to record success in circuit breaker: %v", err))
+			}
 			return
 		}
+
+		// Record failure in circuit breaker
+		err = circuitbreaker.GetManager().RecordFailure(channelId)
+		if err != nil {
+			logger.SysError(fmt.Sprintf("Failed to record failure in circuit breaker: %v", err))
+		}
+
 		channelId := c.GetInt(ctxkey.ChannelId)
 		lastFailedChannelId = channelId
 		channelName := c.GetString(ctxkey.ChannelName)
