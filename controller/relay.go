@@ -109,15 +109,23 @@ func Relay(c *gin.Context) {
 			}
 
 			channel, err = strategy.GetStrategySelector().SelectChannel(availableChannels, c)
-
+			if err != nil {
+				if err.Error() == strategy.ErrNoAvailableChannel {
+					// 如果策略选择渠道失败，并且没有可用渠道，则跳过本次重试
+					continue
+				}
+				logger.Errorf(ctx, "Strategy SelectChannel failed: %+v", err)
+				break
+			}
 		} else {
 			// 使用随机渠道
 			channel, err = dbmodel.CacheGetRandomSatisfiedChannel(group, originalModel, i != retryTimes)
+			if err != nil {
+				logger.Errorf(ctx, "CacheGetRandomSatisfiedChannel failed: %+v", err)
+				break
+			}
 		}
-		if err != nil {
-			logger.Errorf(ctx, "CacheGetRandomSatisfiedChannel failed: %+v", err)
-			break
-		}
+
 		logger.Infof(ctx, "using channel #%d to retry (remain times %d)", channel.Id, i)
 		if channel.Id == lastFailedChannelId {
 			continue

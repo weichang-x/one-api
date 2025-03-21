@@ -122,7 +122,7 @@ func (cb *CircuitBreaker) RecordSuccess(duration int64) error {
 	if err != nil {
 		return err
 	}
-	logger.SysLog(fmt.Sprintf("CircuitBreaker RecordSuccess channel #%d state: %s", cb.channelId, state))
+	// logger.SysLog(fmt.Sprintf("CircuitBreaker RecordSuccess channel #%d state: %s", cb.channelId, state))
 
 	// Reset failure count on success
 	atomic.StoreInt32(&cb.failureCount, 0)
@@ -149,7 +149,7 @@ func (cb *CircuitBreaker) RecordFailure() error {
 
 	atomic.AddInt32(&cb.failureCount, 1)
 	atomic.StoreInt64(&cb.lastFailure, time.Now().Unix())
-	logger.SysLog(fmt.Sprintf("CircuitBreaker RecordFailure channel #%d failureCount: %d", cb.channelId, cb.failureCount))
+	// logger.SysLog(fmt.Sprintf("CircuitBreaker RecordFailure channel #%d failureCount: %d", cb.channelId, cb.failureCount))
 
 	// Update metrics
 	metricsErr := cb.updateMetrics(false, 0)
@@ -260,7 +260,7 @@ func (cb *CircuitBreaker) updateMetrics(success bool, duration int64) error {
 		return err
 	}
 
-	logger.SysLog(fmt.Sprintf("CircuitBreaker updateMetrics channel #%d metrics: %v", cb.channelId, metrics))
+	// logger.SysLog(fmt.Sprintf("CircuitBreaker updateMetrics channel #%d metrics: %v", cb.channelId, metrics))
 	// Store metrics with 1 hour expiration
 	return common.RedisSetWithExpiration(key, string(data), time.Hour)
 }
