@@ -22,6 +22,7 @@ import (
 var (
 	circuitBreakerManager *circuitbreaker.Manager
 	strategySelector      *StrategySelector
+	errNoAvailableChannel = "no available channel with sufficient quota"
 )
 
 func init() {
@@ -131,13 +132,28 @@ func Distribute() func(c *gin.Context) {
 						return
 					}
 				}
+				currentTime := time.Now().UnixMilli()
 				var err error
 				channel, err = strategySelector.SelectChannel(availableChannels, c)
 				if err != nil {
-					abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
-					return
+					if err.Error() == errNoAvailableChannel {
+						// Try to queue the request
+						queue := GetDefaultQueue()
+						channel, err = queue.EnqueueRequest(c.Request.Context())
+						if err != nil {
+							logger.SysError(fmt.Sprintf("Failed to queue request: %v", err))
+							abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
+							return
+						}
+					} else {
+						logger.SysError(fmt.Sprintf("Failed to select channel: %v", err))
+						abortWithMessage(c, http.StatusServiceUnavailable, "所有渠道暂时不可用，请稍后重试")
+						return
+					}
 				}
-
+				//耗时计算
+				duration := time.Now().UnixMilli() - currentTime
+				logger.Infof(ctx, "====>select channel #%d duration: %d ms", channel.Id, duration)
 			}
 
 			logger.Infof(ctx, "user id %d, user group: %s, request model: %s, select channel strategy_enable: %v, using channel #%d", userId, userGroup, requestModel, config.ChannelStrategySelectEnabled, channel.Id)
@@ -150,12 +166,13 @@ func Distribute() func(c *gin.Context) {
 
 		// 继续处理请求
 		c.Next()
+		currentTime := time.Now().UnixMilli()
 		group := sync.WaitGroup{}
 		group.Add(2)
 
 		// 获取响应头中的配额信息
 		quota := getQuotaHeader(c, channel.Type, int64(channel.Id))
-		logger.Infof(ctx, "model: %s, using channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d, Level: %d", requestModel, channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel.Type), quota.RemainingTokensResetTime(channel.Type), channel.KeyLevel)
+		logger.Infof(ctx, "model: %s, using channel #%d, Level: %d", requestModel, channel.Id, channel.KeyLevel)
 		// 更新账户等级
 		go func() {
 			model.UpdateChannelKeyLevel(int64(channel.Id), channel.Type, quota.RPM, quota.TPM, requestModel)
@@ -185,6 +202,8 @@ func Distribute() func(c *gin.Context) {
 			group.Done()
 		}()
 		group.Wait()
+		duration := time.Now().UnixMilli() - currentTime
+		logger.Infof(ctx, "====>update quota #%d duration: %d ms", channel.Id, duration)
 	}
 }
 
@@ -318,18 +337,13 @@ func parseQuotaRFC3339ResetTime(c *gin.Context, header string) int64 {
 
 // 策略
 type StrategySelector struct {
+	//互斥锁实现实现对于保护共享资源访问是线程安全的，可以有效防止竞态条件。
+	//不过需要注意的是，这种全局锁的实现可能会在高并发场景下造成性能瓶颈，因为所有请求都需要串行执行 SelectChannel 方法。
+	//如果性能成为问题，可能需要考虑使用更细粒度的锁策略或其他并发控制机制。
 	mu sync.Mutex
-	wg sync.WaitGroup
 }
 
 func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Context) (*model.Channel, error) {
-	// 等待前面的请求完成
-	s.wg.Wait()
-
-	// 添加新的等待组
-	s.wg.Add(1)
-	defer s.wg.Done()
-
 	// 获取互斥锁
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -342,7 +356,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 	}()
 
 	if len(channels) == 0 {
-		return nil, errors.New("no available channels")
+		return nil, errors.New(errNoAvailableChannel)
 	}
 
 	// 获取当前时间和请求参数
@@ -408,7 +422,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 		}
 
 		// 通道配额大于等于最小消耗token阈值 并且 当前并发量小于等于最大并发量
-		if quota.RemainingTokens(channel.Type) >= int64(config.MinTokenConsumptionThreshold) && (quota.TotalRequests()-quota.RemainingRequests()) <= int64(config.MaxConcurrentRequestsLimit) {
+		if quota.RemainingTokens(channel.Type) >= int64(config.MinTokenConsumptionThreshold) && (quota.TotalRequests()-quota.RemainingRequests()) <= int64(config.GetChannelTypeConcurrentLimit(channel.Type)) {
 			logger.Infof(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel.Type), quota.RemainingTokensResetTime(channel.Type))
 
 			// 预扣除配额
@@ -424,7 +438,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 		}
 	}
 
-	return nil, errors.New("no available channel with sufficient quota")
+	return nil, errors.New(errNoAvailableChannel)
 }
 
 func EstimateNextResetTime(channelType int, quota *model.ChannelQuota, requestModel string) int64 {

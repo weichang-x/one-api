@@ -113,14 +113,41 @@ var SyncFrequency = env.Int("SYNC_FREQUENCY", 10*60) // unit is second
 var MinTokenConsumptionThreshold = env.Int("MIN_TOKEN_CONSUMPTION_THRESHOLD", 1000) // 最小消耗token阈值
 var MaxConcurrentRequestsLimit = env.Int("MAX_CONCURRENT_REQUESTS_LIMIT", 3)        // 最大并发量
 
+// Anthropic通道类型并发请求限制配置
+var AnthropicConcurrentRequestsLimit = env.Int("ANTHROPIC_CONCURRENT_REQUESTS_LIMIT", 3)
+
+// Channel type specific concurrent request limits
+var ChannelTypeConcurrentLimits = make(map[int]int)
+
+// GetChannelTypeConcurrentLimit returns the concurrent request limit for a specific channel type
+// If no specific limit is set for the channel type, returns the default MaxConcurrentRequestsLimit
+func GetChannelTypeConcurrentLimit(channelType int) int {
+	if limit, exists := ChannelTypeConcurrentLimits[channelType]; exists {
+		return limit
+	}
+	return MaxConcurrentRequestsLimit
+}
+
+// SetChannelTypeConcurrentLimit sets the concurrent request limit for a specific channel type
+func SetChannelTypeConcurrentLimit(channelType int, limit int) {
+	ChannelTypeConcurrentLimits[channelType] = limit
+}
+
+// 请求队列配置
+var RequestQueueTimeout = env.Int("REQUEST_QUEUE_TIMEOUT", 30)        // 请求队列超时时间（秒）
+var RequestQueueMaxLength = env.Int("REQUEST_QUEUE_MAX_LENGTH", 1000) // 请求队列最大长度
+
+// 通道策略选择配置
+var ChannelStrategySelectEnabled = strings.ToLower(os.Getenv("CHANNEL_STRATEGY_SELECT_ENABLED")) == "true"
+var ChannelSelectorStrategyModels = env.String("CHANNEL_SELECTOR_STRATEGY_MODELS", "")
+
 var BatchUpdateEnabled = false
 var BatchUpdateInterval = env.Int("BATCH_UPDATE_INTERVAL", 5)
 
 var RelayTimeout = env.Int("RELAY_TIMEOUT", 0) // unit is second
 
 var GeminiSafetySetting = env.String("GEMINI_SAFETY_SETTING", "BLOCK_NONE")
-var ChannelStrategySelectEnabled = strings.ToLower(os.Getenv("CHANNEL_STRATEGY_SELECT_ENABLED")) == "true"
-var ChannelSelectorStrategyModels = env.String("CHANNEL_SELECTOR_STRATEGY_MODELS", "")
+
 var Theme = env.String("THEME", "default")
 var ValidThemes = map[string]bool{
 	"default": true,
