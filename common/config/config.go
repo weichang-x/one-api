@@ -141,6 +141,11 @@ var RequestQueueMaxLength = env.Int("REQUEST_QUEUE_MAX_LENGTH", 1000) // 请求�
 // 通道策略选择配置
 var ChannelSelectorStrategyModels = env.String("CHANNEL_SELECTOR_STRATEGY_MODELS", "")
 
+// 通道配额重置时间窗口配置
+var ResetTimeWindowOpenAI = env.Int("RESET_TIME_WINDOW_OPENAI", 180)
+var ResetTimeWindowClaude = env.Int("RESET_TIME_WINDOW_CLAUDE", 10)
+var ResetTimeWindow = env.Int("RESET_TIME_WINDOW", 60)
+
 // 熔断器配置
 var CircuitBreakerFailureThreshold = env.Int("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5)
 var CircuitBreakerErrorRateThreshold = env.Float64("CIRCUIT_BREAKER_ERROR_RATE_THRESHOLD", 0.6)

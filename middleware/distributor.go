@@ -12,6 +12,7 @@ import (
 	"github.com/songquanpeng/one-api/common/circuitbreaker"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/strategy"
 	"github.com/songquanpeng/one-api/model"
@@ -135,13 +136,12 @@ func Distribute() func(c *gin.Context) {
 				}
 				//耗时计算
 				duration := time.Now().UnixMilli() - currentTime
-				logger.Infof(ctx, "====>select channel #%d duration: %d ms", channel.Id, duration)
+				logger.Debugf(ctx, "select channel #%d cost_times: %d ms", channel.Id, duration)
 			}
 
-			logger.Infof(ctx, "user id %d, user group: %s, request model: %s, select channel strategy_enable: %v, using channel #%d", userId, userGroup, requestModel, ChannelStrategyEnabled, channel.Id)
 		}
 
-		logger.Debugf(ctx, "user id %d, user group: %s, request model: %s, using channel #%d", userId, userGroup, requestModel, channel.Id)
+		logger.Debugf(ctx, "user id %d, user group: %s, request model: %s, using channel #%d, strategy_enable: %v", userId, userGroup, requestModel, channel.Id, ChannelStrategyEnabled)
 
 		// 设置上下文并继续处理请求
 		SetupContextForSelectedChannel(c, channel, requestModel)
@@ -154,10 +154,9 @@ func Distribute() func(c *gin.Context) {
 
 		// 获取响应头中的配额信息
 		quota := getQuotaHeader(c, channel)
-		// resetTime := quota.RemainingTokensResetTime(channel, requestModel)
-		// resetTimeStr := time.Unix(resetTime, 0).Format("2006-01-02 15:04:05")
-		// logger.Infof(ctx, "model: %s, using channel #%d, ========>>>>OTPM/TPM reset time: %v", requestModel, channel.Id, resetTimeStr)
-		logger.Infof(ctx, "model: %s, using channel #%d, Level: %d, quota OTPM/TPM: %v, quota RPM: %v ", requestModel, channel.Id, channel.KeyLevel, quota.RemainingTokens(channel, requestModel), quota.RemainingRequests())
+		resetTime := quota.RemainingTokensResetTime(channel, requestModel)
+		resetTimeStr := time.Unix(resetTime, 0).Format("2006-01-02 15:04:05")
+		logger.Debugf(ctx, "model: %s, using channel #%d, Level: %d, quota OTPM/TPM: %v, quota RPM: %v, resetTime: %s", requestModel, channel.Id, channel.KeyLevel, quota.RemainingTokens(channel, requestModel), quota.RemainingRequests(), resetTimeStr)
 		// 更新账户等级
 		go func() {
 			model.UpdateChannelKeyLevel(int64(channel.Id), channel.Type, quota.RPM, quota.TPM, requestModel)
@@ -170,7 +169,7 @@ func Distribute() func(c *gin.Context) {
 		group.Wait()
 		duration := time.Now().UnixMilli() - currentTime
 		if ChannelStrategyEnabled {
-			logger.Infof(ctx, "====>update quota #%d duration: %d ms", channel.Id, duration)
+			logger.Debugf(ctx, "update quota #%d cost_times: %d ms", channel.Id, duration)
 		}
 	}
 }
@@ -217,18 +216,19 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 
 // 根据请求模型获取响应头配额信息
 func getQuotaHeader(c *gin.Context, channel *model.Channel) *model.ChannelQuota {
+	// logger.Infof(c, "channel #%d, getQuotaHeader: %v", channel.Id, c.Writer.Header())
 	if channel.GetModelType(c.GetString(ctxkey.RequestModel)) == model.ModelTypeClaude {
 		return &model.ChannelQuota{
 			ChannelId:     int64(channel.Id),
-			RemainingTPM:  parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Tokens-Remaining"),
-			RemainingRPM:  parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Requests-Remaining"),
-			RemainingOTPM: parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Output-Tokens-Remaining"),
-			RemainingITPM: parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Input-Tokens-Remaining"),
-			TPM:           parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Tokens-Limit"),
-			OTPM:          parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Output-Tokens-Limit"),
-			ITPM:          parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Input-Tokens-Limit"),
-			RPM:           parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Requests-Limit"),
-			ResetTimeOTPM: parseQuotaRFC3339ResetTime(c, "Anthropic-Ratelimit-Output-Tokens-Reset"), //'2025-03-20T01:42:59Z'
+			RemainingTPM:  parseQuotaHeaderInt64(c, "anthropic-ratelimit-tokens-remaining"),
+			RemainingRPM:  parseQuotaHeaderInt64(c, "anthropic-ratelimit-requests-remaining"),
+			RemainingOTPM: parseQuotaHeaderInt64(c, "anthropic-ratelimit-output-tokens-remaining"),
+			RemainingITPM: parseQuotaHeaderInt64(c, "anthropic-ratelimit-input-tokens-remaining"),
+			TPM:           parseQuotaHeaderInt64(c, "anthropic-ratelimit-tokens-limit"),
+			OTPM:          parseQuotaHeaderInt64(c, "anthropic-ratelimit-output-tokens-limit"),
+			ITPM:          parseQuotaHeaderInt64(c, "anthropic-ratelimit-input-tokens-limit"),
+			RPM:           parseQuotaHeaderInt64(c, "anthropic-ratelimit-requests-limit"),
+			ResetTimeOTPM: parseQuotaRFC3339ResetTime(c, "anthropic-ratelimit-output-tokens-reset"), //'2025-03-20T01:42:59Z'
 		}
 	} else if channel.GetModelType(c.GetString(ctxkey.RequestModel)) == model.ModelTypeOpenAI {
 		return &model.ChannelQuota{
@@ -260,16 +260,16 @@ func updateQuotaAfterRequest(c *gin.Context, quota *model.ChannelQuota, userGrou
 		return
 	}
 
-	// 检查当前响应时间是否大于等于最新请求响应时间
-	currentTime := time.Now().Unix()
-	if latestLog != nil && currentTime >= latestLog.CreatedAt {
+	// 检查当前响应时间是否大于等于最新请求响应时间(毫秒)
+	currentTime := helper.GetTimestampMilli()
+	if latestLog != nil && currentTime >= latestLog.CreatedAtMilli {
 		// 使用内存存储更新配额信息
 		err := model.UpdateChannelQuota(userGroup, requestModel, quota)
 		if err != nil {
 			logger.SysError(fmt.Sprintf("Failed to update channel quota: %v", err))
 		}
 	} else {
-		logger.Warnf(c, "当前响应时间小于最新请求响应时间不更新配额 channel #%d", quota.ChannelId)
+		logger.Debugf(c, "当前响应时间小于最新请求响应时间不更新配额 channel #%d", quota.ChannelId)
 	}
 }
 

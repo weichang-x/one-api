@@ -76,7 +76,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 		selectedChannel := channelsA[0]
 		quota, err := model.GetChannelQuota(userGroup, requestModel, int64(selectedChannel.Id))
 		if err == nil && quota != nil {
-			logger.Infof(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
+			logger.Debugf(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
 
 			// 预扣除配额
 			quota.DeductTokens(selectedChannel, requestModel, int64(config.MinTokenConsumptionThreshold))
@@ -84,7 +84,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 			// 预估下次重置时间
 			resetTime := EstimateNextResetTime(selectedChannel, quota, requestModel)
 			quota.UpdateResetTime(selectedChannel, requestModel, resetTime)
-			logger.Infof(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
+			logger.Debugf(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
 			// 更新内存中的配额信息
 			model.UpdateChannelQuota(userGroup, requestModel, quota)
 			return selectedChannel, nil
@@ -115,7 +115,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 
 		// 通道配额大于等于最小消耗token阈值 并且 当前并发量小于等于最大并发量
 		if quota.RemainingTokens(channel, requestModel) >= int64(config.MinTokenConsumptionThreshold) && (quota.TotalRequests()-quota.RemainingRequests()) <= int64(config.GetChannelTypeConcurrentLimit(channel.Type)) {
-			logger.Infof(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
+			logger.Debugf(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
 
 			// 预扣除配额
 			quota.DeductTokens(channel, requestModel, int64(config.MinTokenConsumptionThreshold))
@@ -123,7 +123,7 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 			// 预估下次重置时间
 			resetTime := EstimateNextResetTime(channel, quota, requestModel)
 			quota.UpdateResetTime(channel, requestModel, resetTime)
-			logger.Infof(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
+			logger.Debugf(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
 			// 更新内存中的配额信息
 			model.UpdateChannelQuota(userGroup, requestModel, quota)
 			return channel, nil
@@ -134,9 +134,9 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 }
 
 func EstimateNextResetTime(channel *model.Channel, quota *model.ChannelQuota, requestModel string) int64 {
-	ResetTimeWindowOpenAI := int64(180)
-	ResetTimeWindowClaude := int64(10)
-	ResetTimeWindow := int64(60)
+	ResetTimeWindowOpenAI := int64(config.ResetTimeWindowOpenAI)
+	ResetTimeWindowClaude := int64(config.ResetTimeWindowClaude)
+	ResetTimeWindow := int64(config.ResetTimeWindow)
 	// 根据通道类型使用特定规则
 	switch channel.GetModelType(requestModel) {
 	case model.ModelTypeOpenAI:

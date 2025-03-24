@@ -15,6 +15,7 @@ type Log struct {
 	Id               int    `json:"id"`
 	UserId           int    `json:"user_id" gorm:"index"`
 	CreatedAt        int64  `json:"created_at" gorm:"bigint;index:idx_created_at_type"`
+	CreatedAtMilli   int64  `json:"created_at_milli" gorm:"bigint;index:idx_created_at_type"`
 	Type             int    `json:"type" gorm:"index:idx_created_at_type"`
 	Content          string `json:"content"`
 	Username         string `json:"username" gorm:"index:index_username_model_name,priority:2;default:''"`
@@ -39,11 +40,12 @@ func RecordLog(userId int, logType int, content string) {
 		return
 	}
 	log := &Log{
-		UserId:    userId,
-		Username:  GetUsernameById(userId),
-		CreatedAt: helper.GetTimestamp(),
-		Type:      logType,
-		Content:   content,
+		UserId:         userId,
+		Username:       GetUsernameById(userId),
+		CreatedAt:      helper.GetTimestamp(),
+		CreatedAtMilli: helper.GetTimestampMilli(),
+		Type:           logType,
+		Content:        content,
 	}
 	err := LOG_DB.Create(log).Error
 	if err != nil {
@@ -53,12 +55,13 @@ func RecordLog(userId int, logType int, content string) {
 
 func RecordTopupLog(userId int, content string, quota int) {
 	log := &Log{
-		UserId:    userId,
-		Username:  GetUsernameById(userId),
-		CreatedAt: helper.GetTimestamp(),
-		Type:      LogTypeTopup,
-		Content:   content,
-		Quota:     quota,
+		UserId:         userId,
+		Username:       GetUsernameById(userId),
+		CreatedAt:      helper.GetTimestamp(),
+		CreatedAtMilli: helper.GetTimestampMilli(),
+		Type:           LogTypeTopup,
+		Content:        content,
+		Quota:          quota,
 	}
 	err := LOG_DB.Create(log).Error
 	if err != nil {
@@ -75,6 +78,7 @@ func RecordConsumeLog(ctx context.Context, userId int, channelId int, promptToke
 		UserId:           userId,
 		Username:         GetUsernameById(userId),
 		CreatedAt:        helper.GetTimestamp(),
+		CreatedAtMilli:   helper.GetTimestampMilli(),
 		Type:             LogTypeConsume,
 		Content:          content,
 		PromptTokens:     promptTokens,
