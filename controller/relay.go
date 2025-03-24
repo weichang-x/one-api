@@ -74,7 +74,7 @@ func Relay(c *gin.Context) {
 	requestId := c.GetString(helper.RequestIdKey)
 	retryTimes := config.RetryTimes
 	if !shouldRetry(c, bizErr.StatusCode) {
-		logger.Infof(ctx, "=====>bizErr.StatusCode: %d", bizErr.StatusCode)
+		// logger.Infof(ctx, "=====>bizErr.StatusCode: %d", bizErr.StatusCode)
 		// Record failure in circuit breaker
 		err := circuitbreaker.GetManager().RecordFailure(channelId)
 		if err != nil {
@@ -85,7 +85,7 @@ func Relay(c *gin.Context) {
 		retryTimes = 0
 	}
 	channelStrategyEnabled := c.GetBool(ctxkey.KeyChannelStrategyEnabled)
-	logger.Infof(ctx, "channelStrategyEnabled: %v", channelStrategyEnabled)
+	// logger.Infof(ctx, "channelStrategyEnabled: %v", channelStrategyEnabled)
 	for i := retryTimes; i > 0; i-- {
 		var channel *dbmodel.Channel
 		var err error
@@ -93,8 +93,9 @@ func Relay(c *gin.Context) {
 			// 使用策略选择渠道
 			availableChannels := dbmodel.GetAvailableChannels(group, originalModel)
 			if len(availableChannels) == 0 {
-				logger.Errorf(ctx, "当前分组 %s 下对于模型 %s 无可用渠道", group, originalModel)
-				break
+				logger.Errorf(ctx, "当前分组 %s 下对于模型 %s 无可用渠道, 稍后会自动重试 (剩余 %d 次)", group, originalModel, i)
+				time.Sleep(time.Millisecond * time.Duration(config.RetryInterval))
+				continue
 			}
 
 			// Filter channels through circuit breaker
@@ -103,15 +104,13 @@ func Relay(c *gin.Context) {
 				logger.SysError(fmt.Sprintf("Failed to filter channels through circuit breaker: %v", err))
 				break
 			}
-			if len(availableChannels) == 0 {
-				logger.Errorf(ctx, "所有渠道暂时不可用，请稍后重试")
-				break
-			}
 
 			channel, err = strategy.GetStrategySelector().SelectChannel(availableChannels, c)
 			if err != nil {
 				if err.Error() == strategy.ErrNoAvailableChannel {
+					logger.Warnf(ctx, "所有渠道暂时不可用, 稍后会自动重试 (剩余 %d 次)", i)
 					// 如果策略选择渠道失败，并且没有可用渠道，则跳过本次重试
+					time.Sleep(time.Millisecond * time.Duration(config.RetryInterval))
 					continue
 				}
 				logger.Errorf(ctx, "Strategy SelectChannel failed: %+v", err)
@@ -124,10 +123,22 @@ func Relay(c *gin.Context) {
 				logger.Errorf(ctx, "CacheGetRandomSatisfiedChannel failed: %+v", err)
 				break
 			}
+			// Check if selected channel is available
+			cb := circuitbreaker.GetManager().GetBreaker(channel.Id)
+			if allowed, err := cb.AllowRequest(); err != nil {
+				logger.SysError(fmt.Sprintf("Failed to check circuit breaker state: %v", err))
+			} else if !allowed {
+				// 如果渠道不可用，则跳过本次重试
+				logger.Warnf(ctx, "渠道 #%d 不可用, 稍后会自动重试 (剩余 %d 次)", channel.Id, i)
+				time.Sleep(time.Millisecond * time.Duration(config.RetryInterval))
+				continue
+			}
 		}
 
 		logger.Infof(ctx, "using channel #%d to retry (remain times %d)", channel.Id, i)
 		if channel.Id == lastFailedChannelId {
+			logger.Warnf(ctx, "channel #%d 不可用, 稍后会自动重试 (剩余 %d 次)", channel.Id, i)
+			time.Sleep(time.Millisecond * time.Duration(config.RetryInterval))
 			continue
 		}
 		middleware.SetupContextForSelectedChannel(c, channel, originalModel)

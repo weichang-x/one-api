@@ -301,26 +301,37 @@ type ChannelQuota struct {
 }
 
 // 初始化通道配额信息
-func initChannelQuotaData(channelId int64, channelType int) *ChannelQuota {
-	if channelType == channeltype.Anthropic {
+func initChannelQuotaData(channelId int64, channelType int, requestModel string) *ChannelQuota {
+	if channelType == channeltype.Anthropic || (channelType == channeltype.Custom && strings.HasPrefix(requestModel, "claude-")) {
 		return &ChannelQuota{
-			ChannelId: channelId,
-			OTPM:      8000,
-			ITPM:      20000,
-			RPM:       50,
-			TPM:       10000,
+			ChannelId:     channelId,
+			OTPM:          8000,
+			ITPM:          20000,
+			RPM:           50,
+			TPM:           28000,
+			RemainingTPM:  28000,
+			RemainingOTPM: 8000,
+			RemainingRPM:  50,
+			RemainingITPM: 20000,
+			ResetTimeOTPM: time.Now().Unix(),
 		}
 	}
 	return &ChannelQuota{
-		ChannelId: channelId,
-		TPM:       30000,
-		RPM:       500,
+		ChannelId:    channelId,
+		TPM:          30000,
+		RPM:          500,
+		RemainingTPM: 30000,
+		RemainingRPM: 500,
+		ResetTimeTPM: time.Now().Unix(),
 	}
 }
 
 // 检查配额是否过期
-func (q *ChannelQuota) IsExpired(channelType int) bool {
-	if channelType == channeltype.Anthropic {
+func (q *ChannelQuota) IsExpired(channel *Channel, requestModel string) bool {
+	//输出剩余配额重置时间和当前时间
+	// fmt.Printf("channel #%d, remaining tokens reset time: %v, current time: %v \n", channel.Id, time.Unix(q.ResetTimeOTPM, 0).Format("2006-01-02 15:04:05"), time.Now().Format("2006-01-02 15:04:05"))
+
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		return atomic.LoadInt64(&q.ResetTimeOTPM) <= time.Now().Unix()
 	} else {
 		return atomic.LoadInt64(&q.ResetTimeTPM) <= time.Now().Unix()
@@ -328,8 +339,8 @@ func (q *ChannelQuota) IsExpired(channelType int) bool {
 }
 
 // 扣除令牌
-func (q *ChannelQuota) DeductTokens(channelType int, tokens int64) {
-	if channelType == channeltype.Anthropic {
+func (q *ChannelQuota) DeductTokens(channel *Channel, requestModel string, tokens int64) {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		atomic.AddInt64(&q.RemainingOTPM, -tokens)
 	} else {
 		atomic.AddInt64(&q.RemainingTPM, -tokens)
@@ -342,8 +353,8 @@ func (q *ChannelQuota) DeductRPM(rpm int64) {
 }
 
 // 预估下次重置时间
-func (q *ChannelQuota) UpdateResetTime(channelType int, resetTime int64) {
-	if channelType == channeltype.Anthropic {
+func (q *ChannelQuota) UpdateResetTime(channel *Channel, requestModel string, resetTime int64) {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		atomic.StoreInt64(&q.ResetTimeOTPM, resetTime)
 	} else {
 		atomic.StoreInt64(&q.ResetTimeTPM, resetTime)
@@ -351,8 +362,8 @@ func (q *ChannelQuota) UpdateResetTime(channelType int, resetTime int64) {
 }
 
 // 剩余令牌
-func (q *ChannelQuota) RemainingTokens(channelType int) int64 {
-	if channelType == channeltype.Anthropic {
+func (q *ChannelQuota) RemainingTokens(channel *Channel, requestModel string) int64 {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		return atomic.LoadInt64(&q.RemainingOTPM)
 	} else {
 		return atomic.LoadInt64(&q.RemainingTPM)
@@ -370,8 +381,8 @@ func (q *ChannelQuota) TotalRequests() int64 {
 }
 
 // 剩余令牌重置时间
-func (q *ChannelQuota) RemainingTokensResetTime(channelType int) int64 {
-	if channelType == channeltype.Anthropic {
+func (q *ChannelQuota) RemainingTokensResetTime(channel *Channel, requestModel string) int64 {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		return atomic.LoadInt64(&q.ResetTimeOTPM)
 	} else {
 		return atomic.LoadInt64(&q.ResetTimeTPM)
@@ -419,7 +430,7 @@ func InitChannelQuotaStore() {
 				if _, ok := channelQuotaStore.store[group][model]; !ok {
 					channelQuotaStore.store[group][model] = make([]*ChannelQuota, 0)
 				}
-				channelQuotaStore.store[group][model] = append(channelQuotaStore.store[group][model], initChannelQuotaData(int64(channel.Id), channel.Type))
+				channelQuotaStore.store[group][model] = append(channelQuotaStore.store[group][model], initChannelQuotaData(int64(channel.Id), channel.Type, model))
 			}
 		}
 	}
@@ -489,7 +500,7 @@ func IncrementChannelQuotaStoreFromDB() {
 				if !exists {
 					channelQuotaStore.store[group][model] = append(
 						channelQuotaStore.store[group][model],
-						initChannelQuotaData(int64(channel.Id), channel.Type),
+						initChannelQuotaData(int64(channel.Id), channel.Type, model),
 					)
 				}
 			}
@@ -628,7 +639,7 @@ func UpdateChannelKeyLevel(channelId int64, channelType int, rpm int64, tpm int6
 
 // 根据配额信息确定账户等级
 func DetermineAccountLevel(channelType int, rpm int64, tpm int64, requestModel string) int {
-	if channelType == channeltype.Anthropic {
+	if channelType == channeltype.Anthropic || (channelType == channeltype.Custom && strings.HasPrefix(requestModel, "claude-")) {
 		switch rpm {
 		case 50:
 			return 1

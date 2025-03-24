@@ -153,8 +153,11 @@ func Distribute() func(c *gin.Context) {
 		group.Add(1)
 
 		// 获取响应头中的配额信息
-		quota := getQuotaHeader(c, channel.Type, int64(channel.Id))
-		logger.Infof(ctx, "model: %s, using channel #%d, Level: %d", requestModel, channel.Id, channel.KeyLevel)
+		quota := getQuotaHeader(c, channel)
+		// resetTime := quota.RemainingTokensResetTime(channel, requestModel)
+		// resetTimeStr := time.Unix(resetTime, 0).Format("2006-01-02 15:04:05")
+		// logger.Infof(ctx, "model: %s, using channel #%d, ========>>>>OTPM/TPM reset time: %v", requestModel, channel.Id, resetTimeStr)
+		logger.Infof(ctx, "model: %s, using channel #%d, Level: %d, quota OTPM/TPM: %v, quota RPM: %v ", requestModel, channel.Id, channel.KeyLevel, quota.RemainingTokens(channel, requestModel), quota.RemainingRequests())
 		// 更新账户等级
 		go func() {
 			model.UpdateChannelKeyLevel(int64(channel.Id), channel.Type, quota.RPM, quota.TPM, requestModel)
@@ -213,24 +216,23 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 }
 
 // 根据请求模型获取响应头配额信息
-func getQuotaHeader(c *gin.Context, channelType int, channelId int64) *model.ChannelQuota {
-	if channelType == channeltype.Anthropic {
+func getQuotaHeader(c *gin.Context, channel *model.Channel) *model.ChannelQuota {
+	if channel.GetModelType(c.GetString(ctxkey.RequestModel)) == model.ModelTypeClaude {
 		return &model.ChannelQuota{
-			ChannelId:     channelId,
-			RemainingTPM:  parseQuotaHeaderInt64(c, "anthropic-ratelimit-tokens-remaining"),
-			RemainingRPM:  parseQuotaHeaderInt64(c, "anthropic-ratelimit-requests-remaining"),
-			RemainingOTPM: parseQuotaHeaderInt64(c, "anthropic-ratelimit-output-tokens-remaining"),
-			RemainingITPM: parseQuotaHeaderInt64(c, "anthropic-ratelimit-input-tokens-remaining"),
-			TPM:           parseQuotaHeaderInt64(c, "anthropic-ratelimit-tokens-limit"),
-			OTPM:          parseQuotaHeaderInt64(c, "anthropic-ratelimit-output-tokens-limit"),
-			ITPM:          parseQuotaHeaderInt64(c, "anthropic-ratelimit-input-tokens-limit"),
-			RPM:           parseQuotaHeaderInt64(c, "anthropic-ratelimit-requests-limit"),
-			ResetTimeOTPM: parseQuotaRFC3339ResetTime(c, "anthropic-ratelimit-output-tokens-reset"), //'2025-03-20T01:42:59Z'
-			// ResetTimeTPM:  parseQuotaRFC3339ResetTime(c, "anthropic-ratelimit-tokens-reset"),
+			ChannelId:     int64(channel.Id),
+			RemainingTPM:  parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Tokens-Remaining"),
+			RemainingRPM:  parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Requests-Remaining"),
+			RemainingOTPM: parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Output-Tokens-Remaining"),
+			RemainingITPM: parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Input-Tokens-Remaining"),
+			TPM:           parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Tokens-Limit"),
+			OTPM:          parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Output-Tokens-Limit"),
+			ITPM:          parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Input-Tokens-Limit"),
+			RPM:           parseQuotaHeaderInt64(c, "Anthropic-Ratelimit-Requests-Limit"),
+			ResetTimeOTPM: parseQuotaRFC3339ResetTime(c, "Anthropic-Ratelimit-Output-Tokens-Reset"), //'2025-03-20T01:42:59Z'
 		}
-	} else if channelType == channeltype.OpenAI {
+	} else if channel.GetModelType(c.GetString(ctxkey.RequestModel)) == model.ModelTypeOpenAI {
 		return &model.ChannelQuota{
-			ChannelId:    channelId,
+			ChannelId:    int64(channel.Id),
 			RemainingTPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-tokens"),
 			RemainingRPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-requests"),
 			TPM:          parseQuotaHeaderInt64(c, "x-ratelimit-limit-tokens"),
@@ -240,7 +242,7 @@ func getQuotaHeader(c *gin.Context, channelType int, channelId int64) *model.Cha
 	}
 
 	return &model.ChannelQuota{
-		ChannelId:    channelId,
+		ChannelId:    int64(channel.Id),
 		RemainingTPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-tokens"),
 		RemainingRPM: parseQuotaHeaderInt64(c, "x-ratelimit-remaining-requests"),
 		TPM:          parseQuotaHeaderInt64(c, "x-ratelimit-limit-tokens"),

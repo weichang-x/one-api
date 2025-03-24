@@ -3,10 +3,12 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/relay/channeltype"
 	"gorm.io/gorm"
 )
 
@@ -128,7 +130,7 @@ func (channel *Channel) GetModelMapping() map[string]string {
 func (channel *Channel) Insert() error {
 	var err error
 	err = DB.Create(channel).Error
-	if err != nil {
+	if err != nil && err != gorm.ErrDuplicatedKey {
 		return err
 	}
 	err = channel.AddAbilities()
@@ -138,7 +140,7 @@ func (channel *Channel) Insert() error {
 func (channel *Channel) Update() error {
 	var err error
 	err = DB.Model(channel).Updates(channel).Error
-	if err != nil {
+	if err != nil && err != gorm.ErrDuplicatedKey {
 		return err
 	}
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
@@ -186,6 +188,25 @@ func (channel *Channel) LoadConfig() (ChannelConfig, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+type ModelType string
+
+const (
+	ModelTypeClaude ModelType = "claude"
+	ModelTypeOpenAI ModelType = "openai"
+	ModelTypeOther  ModelType = "other"
+)
+
+// 根据渠道类型和请求模型名称判断模型类型
+func (channel *Channel) GetModelType(requestModel string) ModelType {
+	if channel.Type == channeltype.Anthropic || (channel.Type == channeltype.Custom && strings.HasPrefix(requestModel, "claude-")) {
+		return ModelTypeClaude
+	}
+	if channel.Type == channeltype.OpenAI || (channel.Type == channeltype.Custom && strings.HasPrefix(requestModel, "gpt-")) {
+		return ModelTypeOpenAI
+	}
+	return ModelTypeOther
 }
 
 func UpdateChannelStatusById(id int, status int) {

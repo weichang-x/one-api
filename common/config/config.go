@@ -98,7 +98,8 @@ var AutomaticEnableChannelEnabled = false
 var QuotaRemindThreshold int64 = 1000
 var PreConsumedQuota int64 = 500
 var ApproximateTokenEnabled = false
-var RetryTimes = env.Int("RETRY_TIMES", 3)
+var RetryTimes = env.Int("RETRY_TIMES", 3)         // 重试次数
+var RetryInterval = env.Int("RETRY_INTERVAL", 100) // 重试间隔（毫秒）
 
 var RootUserEmail = ""
 
@@ -111,7 +112,7 @@ var SyncFrequency = env.Int("SYNC_FREQUENCY", 10*60) // unit is second
 
 // 通道配额阈值配置
 var MinTokenConsumptionThreshold = env.Int("MIN_TOKEN_CONSUMPTION_THRESHOLD", 1000) // 最小消耗token阈值
-var MaxConcurrentRequestsLimit = env.Int("MAX_CONCURRENT_REQUESTS_LIMIT", 3)        // 最大并发量
+var MaxConcurrentRequestsLimit = env.Int("MAX_CONCURRENT_REQUESTS_LIMIT", 10)       // 最大并发量
 
 // Anthropic通道类型并发请求限制配置
 var AnthropicConcurrentRequestsLimit = env.Int("ANTHROPIC_CONCURRENT_REQUESTS_LIMIT", 3)
