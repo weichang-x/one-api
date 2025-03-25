@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -298,6 +299,9 @@ type ChannelQuota struct {
 	RemainingITPM int64 // 剩余每分钟输入令牌数(claude)
 	ResetTimeOTPM int64 // 每分钟输出令牌数重置时间(claude)
 	ResetTimeTPM  int64 // 每分钟令牌数重置时间
+
+	ConsumedTPMInWindow  int64 // 时间窗口内消耗令牌总数
+	ConsumedOTPMInWindow int64 // 时间窗口内消耗输出令牌总数(claude)
 }
 
 // 初始化通道配额信息
@@ -314,6 +318,8 @@ func initChannelQuotaData(channelId int64, channelType int, requestModel string)
 			RemainingRPM:  50,
 			RemainingITPM: 20000,
 			ResetTimeOTPM: time.Now().Unix(),
+
+			ConsumedOTPMInWindow: 0,
 		}
 	}
 	return &ChannelQuota{
@@ -323,6 +329,8 @@ func initChannelQuotaData(channelId int64, channelType int, requestModel string)
 		RemainingTPM: 30000,
 		RemainingRPM: 500,
 		ResetTimeTPM: time.Now().Unix(),
+
+		ConsumedTPMInWindow: 0,
 	}
 }
 
@@ -332,24 +340,42 @@ func (q *ChannelQuota) IsExpired(channel *Channel, requestModel string) bool {
 	// fmt.Printf("channel #%d, remaining tokens reset time: %v, current time: %v \n", channel.Id, time.Unix(q.ResetTimeOTPM, 0).Format("2006-01-02 15:04:05"), time.Now().Format("2006-01-02 15:04:05"))
 
 	if channel.GetModelType(requestModel) == ModelTypeClaude {
-		return atomic.LoadInt64(&q.ResetTimeOTPM) <= time.Now().Unix()
+		expired := atomic.LoadInt64(&q.ResetTimeOTPM) <= time.Now().Unix()
+		if expired {
+			// 重置最大消耗令牌数
+			atomic.StoreInt64(&q.ConsumedOTPMInWindow, 0)
+		}
+		return expired
 	} else {
-		return atomic.LoadInt64(&q.ResetTimeTPM) <= time.Now().Unix()
+		expired := atomic.LoadInt64(&q.ResetTimeTPM) <= time.Now().Unix()
+		if expired {
+			// 重置最大消耗令牌数
+			atomic.StoreInt64(&q.ConsumedTPMInWindow, 0)
+		}
+		return expired
 	}
 }
 
 // 扣除令牌
-func (q *ChannelQuota) DeductTokens(channel *Channel, requestModel string, tokens int64) {
+func (q *ChannelQuota) DeductTokens(channel *Channel, requestModel string, tokens int64) bool {
+	if q.RemainingTokens(channel, requestModel) <= 0 {
+		return false
+	}
 	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		atomic.AddInt64(&q.RemainingOTPM, -tokens)
 	} else {
 		atomic.AddInt64(&q.RemainingTPM, -tokens)
 	}
+	return true
 }
 
 // 扣除请求数
-func (q *ChannelQuota) DeductRPM(rpm int64) {
+func (q *ChannelQuota) DeductRPM(rpm int64) bool {
+	if q.RemainingRequests() <= 0 {
+		return false
+	}
 	atomic.AddInt64(&q.RemainingRPM, -rpm)
+	return true
 }
 
 // 预估下次重置时间
@@ -380,12 +406,49 @@ func (q *ChannelQuota) TotalRequests() int64 {
 	return atomic.LoadInt64(&q.RPM)
 }
 
+// 总的配额数
+func (q *ChannelQuota) TotalTokens(channel *Channel, requestModel string) int64 {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
+		return atomic.LoadInt64(&q.OTPM)
+	} else {
+		return atomic.LoadInt64(&q.TPM)
+	}
+}
+
 // 剩余令牌重置时间
 func (q *ChannelQuota) RemainingTokensResetTime(channel *Channel, requestModel string) int64 {
 	if channel.GetModelType(requestModel) == ModelTypeClaude {
 		return atomic.LoadInt64(&q.ResetTimeOTPM)
 	} else {
 		return atomic.LoadInt64(&q.ResetTimeTPM)
+	}
+}
+
+// 记录时间窗口内最大消耗令牌数
+func (q *ChannelQuota) RecordConsumedTokensInWindow(channel *Channel, requestModel string) {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
+		// 更新最大消耗令牌数
+		currentMaxOTPM := atomic.LoadInt64(&q.ConsumedOTPMInWindow)
+		consumedOTPM := q.OTPM - atomic.LoadInt64(&q.RemainingOTPM)
+		if consumedOTPM > currentMaxOTPM {
+			atomic.StoreInt64(&q.ConsumedOTPMInWindow, consumedOTPM)
+		}
+	} else {
+		// 更新最大消耗令牌数
+		currentMaxTPM := atomic.LoadInt64(&q.ConsumedTPMInWindow)
+		consumedTPM := q.TPM - atomic.LoadInt64(&q.RemainingTPM)
+		if consumedTPM > currentMaxTPM {
+			atomic.StoreInt64(&q.ConsumedTPMInWindow, consumedTPM)
+		}
+	}
+}
+
+// 获取时间窗口内最大消耗令牌数
+func (q *ChannelQuota) GetConsumedTokensInWindow(channel *Channel, requestModel string) int64 {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
+		return atomic.LoadInt64(&q.ConsumedOTPMInWindow)
+	} else {
+		return atomic.LoadInt64(&q.ConsumedTPMInWindow)
 	}
 }
 
@@ -684,4 +747,69 @@ func DetermineAccountLevel(channelType int, rpm int64, tpm int64, requestModel s
 		return 1
 	}
 	return 1
+}
+
+// 根据请求模型获取响应头配额信息
+func GetQuotaHeader(httpHeader http.Header, requestModel string, channel *Channel) *ChannelQuota {
+	if channel.GetModelType(requestModel) == ModelTypeClaude {
+		return &ChannelQuota{
+			ChannelId:     int64(channel.Id),
+			RemainingTPM:  parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-tokens-remaining"),
+			RemainingRPM:  parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-requests-remaining"),
+			RemainingOTPM: parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-output-tokens-remaining"),
+			RemainingITPM: parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-input-tokens-remaining"),
+			TPM:           parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-tokens-limit"),
+			OTPM:          parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-output-tokens-limit"),
+			ITPM:          parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-input-tokens-limit"),
+			RPM:           parseQuotaHeaderInt64(httpHeader, "anthropic-ratelimit-requests-limit"),
+			ResetTimeOTPM: parseQuotaRFC3339ResetTime(httpHeader, "anthropic-ratelimit-output-tokens-reset"), //'2025-03-20T01:42:59Z'
+		}
+	} else if channel.GetModelType(requestModel) == ModelTypeOpenAI {
+		return &ChannelQuota{
+			ChannelId:    int64(channel.Id),
+			RemainingTPM: parseQuotaHeaderInt64(httpHeader, "x-ratelimit-remaining-tokens"),
+			RemainingRPM: parseQuotaHeaderInt64(httpHeader, "x-ratelimit-remaining-requests"),
+			TPM:          parseQuotaHeaderInt64(httpHeader, "x-ratelimit-limit-tokens"),
+			RPM:          parseQuotaHeaderInt64(httpHeader, "x-ratelimit-limit-requests"),
+			ResetTimeTPM: parseQuotaDurationResetTime(httpHeader, "x-ratelimit-reset-tokens"), //'1m6s'
+		}
+	}
+
+	return &ChannelQuota{
+		ChannelId:    int64(channel.Id),
+		RemainingTPM: parseQuotaHeaderInt64(httpHeader, "x-ratelimit-remaining-tokens"),
+		RemainingRPM: parseQuotaHeaderInt64(httpHeader, "x-ratelimit-remaining-requests"),
+		TPM:          parseQuotaHeaderInt64(httpHeader, "x-ratelimit-limit-tokens"),
+		RPM:          parseQuotaHeaderInt64(httpHeader, "x-ratelimit-limit-requests"),
+		ResetTimeTPM: parseQuotaDurationResetTime(httpHeader, "x-ratelimit-reset-tokens"),
+	}
+}
+
+func parseQuotaHeaderInt64(httpHeader http.Header, header string) int64 {
+	value := httpHeader.Get(header)
+	if value == "" {
+		return 0
+	}
+	quota, _ := strconv.ParseInt(value, 10, 64)
+	return quota
+}
+
+// 解析时间间隔 '1m6s' 返回 时间戳=当前时间+
+func parseQuotaDurationResetTime(httpHeader http.Header, header string) int64 {
+	value := httpHeader.Get(header)
+	if value == "" {
+		return 0
+	}
+	resetTime, _ := time.ParseDuration(value)
+	return time.Now().Unix() + int64(resetTime)
+}
+
+// 解析字符串时间格式 '2025-03-20T01:42:59Z'
+func parseQuotaRFC3339ResetTime(httpHeader http.Header, header string) int64 {
+	value := httpHeader.Get(header)
+	if value == "" {
+		return 0
+	}
+	quota, _ := time.Parse(time.RFC3339, value)
+	return quota.Unix()
 }

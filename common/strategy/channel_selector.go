@@ -79,15 +79,18 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 			logger.Debugf(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
 
 			// 预扣除配额
-			quota.DeductTokens(selectedChannel, requestModel, int64(config.MinTokenConsumptionThreshold))
-			quota.DeductRPM(1)
-			// 预估下次重置时间
-			resetTime := EstimateNextResetTime(selectedChannel, quota, requestModel)
-			quota.UpdateResetTime(selectedChannel, requestModel, resetTime)
-			logger.Debugf(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
-			// 更新内存中的配额信息
-			model.UpdateChannelQuota(userGroup, requestModel, quota)
-			return selectedChannel, nil
+			okDeductTokens := quota.DeductTokens(selectedChannel, requestModel, int64(config.MinTokenConsumptionThreshold))
+			okDeductRPM := quota.DeductRPM(1)
+			// 如果预扣除配额成功，则更新配额信息
+			if okDeductTokens && okDeductRPM {
+				// 预估下次重置时间
+				resetTime := EstimateNextResetTime(selectedChannel, quota, requestModel)
+				quota.UpdateResetTime(selectedChannel, requestModel, resetTime)
+				logger.Debugf(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", selectedChannel.Id, quota.RemainingRequests(), quota.RemainingTokens(selectedChannel, requestModel), quota.RemainingTokensResetTime(selectedChannel, requestModel))
+				// 更新内存中的配额信息
+				model.UpdateChannelQuota(userGroup, requestModel, quota)
+				return selectedChannel, nil
+			}
 		}
 	}
 
@@ -113,20 +116,22 @@ func (s *StrategySelector) SelectChannel(channels []*model.Channel, ctx *gin.Con
 			break
 		}
 
-		// 通道配额大于等于最小消耗token阈值 并且 当前并发量小于等于最大并发量
+		// 通道剩余tokens大于等于最小消耗token阈值 并且 当前并发量小于等于最大并发量
 		if quota.RemainingTokens(channel, requestModel) >= int64(config.MinTokenConsumptionThreshold) && (quota.TotalRequests()-quota.RemainingRequests()) <= int64(config.GetChannelTypeConcurrentLimit(channel.Type)) {
 			logger.Debugf(ctx, "当前配额 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
 
 			// 预扣除配额
-			quota.DeductTokens(channel, requestModel, int64(config.MinTokenConsumptionThreshold))
-			quota.DeductRPM(1)
-			// 预估下次重置时间
-			resetTime := EstimateNextResetTime(channel, quota, requestModel)
-			quota.UpdateResetTime(channel, requestModel, resetTime)
-			logger.Debugf(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
-			// 更新内存中的配额信息
-			model.UpdateChannelQuota(userGroup, requestModel, quota)
-			return channel, nil
+			okDeductTokens := quota.DeductTokens(channel, requestModel, int64(config.MinTokenConsumptionThreshold))
+			okDeductRPM := quota.DeductRPM(1)
+			if okDeductTokens && okDeductRPM {
+				// 预估下次重置时间
+				resetTime := EstimateNextResetTime(channel, quota, requestModel)
+				quota.UpdateResetTime(channel, requestModel, resetTime)
+				logger.Debugf(ctx, "预扣除配额结果 channel #%d, RemainRPM: %d, RemainTPM: %d, ResetTimeTokens: %d", channel.Id, quota.RemainingRequests(), quota.RemainingTokens(channel, requestModel), quota.RemainingTokensResetTime(channel, requestModel))
+				// 更新内存中的配额信息
+				model.UpdateChannelQuota(userGroup, requestModel, quota)
+				return channel, nil
+			}
 		}
 	}
 

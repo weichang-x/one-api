@@ -1,1 +1,1 @@
-export SQL_DSN="root:@tcp(localhost:3306)/one_api" REDIS_CONN_STRING="redis://default:@localhost:6379/0"  SYNC_FREQUENCY=600 && ./one-api --port 3000 --log-dir ./logs
+export MIN_TOKEN_CONSUMPTION_THRESHOLD=5000 MAX_CONCURRENT_REQUESTS_LIMIT=17 SQL_DSN="root:@tcp(localhost:3306)/one_api" REDIS_CONN_STRING="redis://default:@localhost:6379/0"  SYNC_FREQUENCY=60 && ./one-api --port 3000 --log-dir ./logs
